@@ -121,28 +121,6 @@ def main():
             except Exception as e:
                 logger.error(f"Error reading single file {source_path}: {e}")
         
-        # Load tasks to process
-        # with open(config["paths"]["data_file"], 'r', encoding='utf-8') as f:
-        #     for line in f:
-        #         try:
-        #             task_data = json.loads(line.strip())
-        #
-        #             # Skip if already processed
-        #             if task_data['id'] in processed_ids:
-        #                 logger.info(f"⏭️  Skipping processed task: {task_data['id']}")
-        #                 continue
-        #
-        #             tasks_to_process.append(task_data)
-        #
-        #             # Break if we've reached the max tasks limit
-        #             if config["processing"]["max_tasks"] and len(tasks_to_process) >= config["processing"]["max_tasks"]:
-        #                 break
-        #
-        #         except json.JSONDecodeError:
-        #             logger.warning(f"Warning: Skipping invalid JSON line")
-        #         except Exception as e:
-        #             logger.error(f"Error loading task: {e}")
-        
         if not tasks_to_process:
             logger.info("No new tasks to process")
             return
