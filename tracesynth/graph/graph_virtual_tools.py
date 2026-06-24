@@ -14,6 +14,7 @@ from functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
     mock_tool_response, solve_task_by_tools, mock_user_response
 )
+from tracesynth.functions.prompt import solve_task_user_prompt, solve_task_system_prompt
 
 # Add a lock for thread-safe file writing
 log_file_lock = threading.Lock()
@@ -142,7 +143,8 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
         for tool in checked_tools:
             tools_description += json.dumps({"type": "function", "function": tool}) + "\n"
 
-        system_prompt = """<policy>{restrict}</policy>
+        system_prompt = solve_task_system_prompt
+        system_prompt2 = """<policy>{restrict}</policy>
 # Tools
 
 You may call one or more functions to assist with the user query.
@@ -157,12 +159,15 @@ For each function call, return a json object with function name and arguments wi
 {{"name": <function-name>, "arguments": <args-json-object>}}
 </tool_call>"""
         system_prompt = system_prompt.format(available_tools=tools_description, restrict=restrict)
-        prompt = f"""Task Description: {task_info}.
+        prompt = solve_task_user_prompt.format(
+            task_info=task_info
+        )
+        prompt2 = f"""Task Description: {task_info}.
 
 ### Requirements:
 1. Please call only one tool at a time, and you must provide your brief reasoning process before using any tool. You can not just give a tool call without providing your reasoning process.
 
-2. Once the task is complete, output the final answer, wrapping the answer in `<answer></answer>` as a termination signal. 
+2. Once the task is complete, output the final answer, wrapping the answer in `<answer></answer>` as a termination signal.
 
 3. IMPORTANT: The user most likely provided insufficient information, you are encouraged to interact with the user to gather more information if needed. Please interact with the user multiple turns, the more times you interact, the more information you can gather. Interact with the user to check for the important information!!!
 """

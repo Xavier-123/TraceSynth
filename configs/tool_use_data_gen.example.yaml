@@ -26,11 +26,11 @@ processing:
   max_tasks: 2
 
 logging:
-  task_file_path: "output/virtual_tool_use.jsonl"
-  solve_path: "output/solve_tool_use/"
+  task_file_path: "../output/virtual_tool_use.jsonl"
+  solve_path: "../output/solve_tool_use/"
 
 paths:
-  data_file: "configs/persona_5K.jsonl"
+  data_file: "../configs/persona_5K.jsonl"
 
 api_configs:
   "Qwen3-235B-A22B-Instruct-2507":
@@ -42,3 +42,7 @@ api_configs:
   "Local":
     api_base: "http://0.0.0.0:8000/v1"
     api_key_env: EMPTY
+
+tool_set_gen:
+  num_tools: "1~2"
+  num_sub: "2~4"
