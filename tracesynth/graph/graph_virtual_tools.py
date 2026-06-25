@@ -41,6 +41,7 @@ class AgentState(TypedDict):
     current_tool_call: str
     task_finished: str
     failure_reason: str
+    tool_call_retry_count: int
 
 
 def build_failure(reason: str, **extra: Any) -> Dict[str, Any]:
@@ -128,7 +129,17 @@ def create_step_config(
 
     step_config["configurable"]["api_configs"] = base_config["configurable"]["api_configs"]
 
+    retry_cfg = base_config["configurable"].get("retry", {})
+    for key in ("api_max_retries", "api_retry_base", "parse_max_retries", "tool_call_max_retries"):
+        if key in retry_cfg:
+            step_config["configurable"][key] = retry_cfg[key]
+
     return step_config
+
+
+def get_tool_call_max_retries(config: RunnableConfig) -> int:
+    retry_cfg = config.get("configurable", {}).get("retry", {})
+    return int(retry_cfg.get("tool_call_max_retries", 3))
 
 
 def get_synthesis_complexity(config: RunnableConfig) -> SynthesisComplexity:
@@ -212,21 +223,9 @@ def check_tools_node(state: AgentState, config: RunnableConfig):
     complexity = get_synthesis_complexity(config)
     checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
 
-    try:
-        checked_tools = json.loads(checked_tools)
-    except (TypeError, json.JSONDecodeError) as exc:
-        logger.warning("checked_tools is not valid JSON for task %s: %s", fuzzy_task, exc)
+    if checked_tools is None:
+        logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
         return build_failure("ToolCheckAgent returned invalid JSON", **{"checked_tools": None})
-
-    if not isinstance(checked_tools, list) or not checked_tools:
-        return build_failure(
-            "ToolCheckAgent returned an empty or non-list tool set",
-            **{"checked_tools": checked_tools},
-        )
-
-    for tool in checked_tools:
-        if not isinstance(tool, dict) or not tool.get("name") or not isinstance(tool.get("parameters"), dict):
-            return build_failure("ToolCheckAgent returned an invalid tool schema", **{"checked_tools": checked_tools})
 
     return {
         "checked_tools": checked_tools
@@ -287,7 +286,26 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
         else:
             is_valid, error = validate_tool_call(tool_call_info, state["checked_tools"])
             if not is_valid:
-                return build_failure(error or "Invalid tool_call", **{"solve_history": solve_history})
+                retry_count = state.get("tool_call_retry_count", 0)
+                max_retries = get_tool_call_max_retries(config)
+                if retry_count >= max_retries:
+                    return build_failure(
+                        error or "Invalid tool_call",
+                        **{"solve_history": solve_history},
+                    )
+                solve_history.append({
+                    "role": "user",
+                    "content": (
+                        f"<tool_response>你的 tool_call 非法: {error}，"
+                        "请修正后重新输出</tool_response>"
+                    ),
+                })
+                return {
+                    "current_tool_call": None,
+                    "solve_history": solve_history,
+                    "task_finished": "Retry solve",
+                    "tool_call_retry_count": retry_count + 1,
+                }
             task_finished = "Tool call"
     else:
         task_finished = "Terminated"
@@ -362,6 +380,8 @@ def should_call_tool(state: AgentState):
         return "end"
     elif state["task_finished"] == "Tool call":
         return "tool_call"
+    elif state["task_finished"] == "Retry solve":
+        return "retry_solve"
     else:
         return "user"
 
@@ -382,7 +402,7 @@ builder.add_edge("check_tools", "reason_and_act")
 builder.add_conditional_edges(
     "reason_and_act",
     should_call_tool,
-    {"tool_call": "mock_tools", "user": "mock_user", "end": END}
+    {"tool_call": "mock_tools", "user": "mock_user", "retry_solve": "reason_and_act", "end": END}
 )
 builder.add_edge("mock_tools", "reason_and_act")
 builder.add_edge("mock_user", "reason_and_act")
@@ -426,7 +446,8 @@ def run_agent(seed_info: dict, run_config: dict = None):
         "task_finished": False,
         "failure_reason": "",
         "solve_history": [],
-        "tool_call_history": []
+        "tool_call_history": [],
+        "tool_call_retry_count": 0,
     }
     run_config["recursion_limit"] = 100
     final_state = graph.invoke(initial_state, config=run_config)

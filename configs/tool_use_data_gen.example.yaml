@@ -29,6 +29,12 @@ processing:
   max_workers: 1
   max_tasks: 2
 
+retry:
+  api_max_retries: 3
+  api_retry_base: 1.0
+  parse_max_retries: 2
+  tool_call_max_retries: 3
+
 logging:
   task_file_path: "../output/virtual_tool_use.jsonl"
   failed_task_file_path: "../output/virtual_tool_use.failed.jsonl"

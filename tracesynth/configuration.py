@@ -51,7 +51,7 @@ class SynthesisComplexity(BaseModel):
 
     # --- iteration complexity ---
     retrieval_rounds: str = Field(
-        default="1~2",
+        default="2~4",
         description="Expected step-7→2 retrieval iteration rounds in task design and solving.",
     )
     info_gaps: str = Field(
@@ -132,6 +132,10 @@ class ModelConfiguration(BaseModel):
     use_tools: bool = Field(default=True, description="是否使用工具。")
     use_thinking: bool = Field(default=True, description="是否使用思考模式。")
     api_configs: Dict[str, Dict[str, str]] = Field(default=None, description="不同模型的API配置映射。")
+    api_max_retries: int = Field(default=3, description="API 瞬时错误最大尝试次数。")
+    api_retry_base: float = Field(default=1.0, description="API 重试指数退避基数（秒）。")
+    parse_max_retries: int = Field(default=2, description="输出解析失败后的最大重采样次数。")
+    tool_call_max_retries: int = Field(default=3, description="Solver 非法 tool_call 自纠错最大次数。")
     @classmethod
     def from_runnable_config(cls, config: Optional[RunnableConfig] = None) -> "ModelConfiguration":
         """从 RunnableConfig 创建一个 Configuration 实例。"""
