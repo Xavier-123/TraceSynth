@@ -36,27 +36,12 @@ def format_range(value: str | int, unit: str = "") -> str:
 class SynthesisComplexity(BaseModel):
     """Controls task complexity and iteration complexity for Agentic RAG data synthesis."""
 
-    # --- task complexity ---
-    num_tools: str = Field(default="2~4", description="Number of RAG tools to design.")
-    num_tool_categories: str = Field(
-        default="2~3",
-        description="How many of the 4 RAG tool categories (query/retrieval/post/eval) to cover.",
-    )
-    num_pipeline_stages: str = Field(
-        default="4~6",
-        description="How many of the 8 Agentic RAG pipeline stages the workflow must cover.",
-    )
+    num_tools: str = Field(default="4~6", description="Number of RAG tools to design (>=4 to cover step2~5).")
     num_custom_tools: str = Field(default="1", description="Number of custom virtual RAG components.")
     distractor_tools: str = Field(default="1~2", description="Number of distractor tools in tool_check.")
-
-    # --- iteration complexity ---
-    retrieval_rounds: str = Field(
-        default="2~4",
-        description="Expected step-7→2 retrieval iteration rounds in task design and solving.",
-    )
-    info_gaps: str = Field(
-        default="1~3",
-        description="Number of information gaps requiring supplemental retrieval per task.",
+    max_iterations: str = Field(
+        default="1~2",
+        description="Expected step5→2 retrieval iteration rounds in task design and solving.",
     )
 
     @classmethod
@@ -76,47 +61,44 @@ class SynthesisComplexity(BaseModel):
             if key in field_names and val is not None:
                 values[key] = str(val)
 
-        # Legacy: ToolSetGenAgent.num_tools / num_sub
+        # Legacy: ToolSetGenAgent.num_tools
         legacy = run_config.get("ToolSetGenAgent") or run_config.get("tool_set_gen") or {}
         if "num_tools" in legacy and "num_tools" not in values:
             values["num_tools"] = str(legacy["num_tools"])
-        if "num_sub" in legacy and "num_pipeline_stages" not in values:
-            values["num_pipeline_stages"] = str(legacy["num_sub"])
+
+        # Legacy: map retrieval_rounds → max_iterations
+        if "retrieval_rounds" in iter_cfg and "max_iterations" not in values:
+            values["max_iterations"] = str(iter_cfg["retrieval_rounds"])
 
         return cls(**values)
 
     def to_prompt_vars(self) -> Dict[str, str]:
         """Return placeholder dict for str.format on prompts."""
-        rounds_lo, rounds_hi = parse_range(self.retrieval_rounds)
-        gaps_lo, gaps_hi = parse_range(self.info_gaps)
+        iter_lo, iter_hi = parse_range(self.max_iterations)
 
         iteration_note = (
-            f"无需迭代补检，首轮检索应能凑齐回答所需的全部信息。"
-            if rounds_hi == 0
+            "无需迭代补检，单轮检索即可凑齐回答所需的全部信息。"
+            if iter_hi == 0
             else (
-                f"须规划 {format_range(self.retrieval_rounds, '轮')} 步骤7→2 检索迭代回路，"
-                f"每轮存在 {format_range(self.info_gaps, '个')} 待补检信息缺口。"
+                f"须规划 {format_range(self.max_iterations, '轮')} 步骤5→2 检索迭代回路，"
+                "每轮评估后根据缺口分析返回步骤2重新优化 Query 并补检。"
             )
         )
 
         return {
             "num_tools": format_range(self.num_tools, "个"),
-            "num_tool_categories": format_range(self.num_tool_categories, "类"),
-            "num_pipeline_stages": format_range(self.num_pipeline_stages, "个"),
             "num_custom_tools": format_range(self.num_custom_tools, "个"),
             "distractor_tools": format_range(self.distractor_tools, "个"),
-            "retrieval_rounds": format_range(self.retrieval_rounds, "轮"),
-            "info_gaps": format_range(self.info_gaps, "个"),
-            "min_retrieval_rounds": str(rounds_lo),
-            "max_retrieval_rounds": str(rounds_hi),
-            "min_info_gaps": str(gaps_lo),
-            "max_info_gaps": str(gaps_hi),
+            "max_iterations": format_range(self.max_iterations, "轮"),
+            "min_iterations": str(iter_lo),
+            "max_iterations_val": str(iter_hi),
             "iteration_requirement": iteration_note,
             "complexity_summary": (
                 f"任务复杂度：设计 {format_range(self.num_tools, '个')} RAG 工具，"
-                f"覆盖 {format_range(self.num_tool_categories, '类')} 工具类别、"
-                f"{format_range(self.num_pipeline_stages, '个')} 流水线阶段，"
-                f"含 {format_range(self.num_custom_tools, '个')} 自定义组件；"
+                f"覆盖全部 4 类工具（检索前优化/检索/检索后优化/评估），"
+                f"对齐 step2~step5 四个必经步骤，"
+                f"含 {format_range(self.num_custom_tools, '个')} 自定义组件、"
+                f"{format_range(self.distractor_tools, '个')} 干扰工具；"
                 f"迭代复杂度：{iteration_note}"
             ),
         }

@@ -54,14 +54,11 @@ api_configs:
     api_base: "http://0.0.0.0:8000/v1"
     api_key_env: EMPTY
 
-# Agentic RAG 数据合成复杂度
+# Agentic RAG 数据合成复杂度（6 步流程，4 个参数）
 synthesis:
   task_complexity:
-    num_tools: "1~2"
-    num_tool_categories: "2~2"
-    num_pipeline_stages: "2~4"
+    num_tools: "4~6"
     num_custom_tools: "1"
     distractor_tools: "1~2"
   iteration_complexity:
-    retrieval_rounds: "0~1"
-    info_gaps: "1~2"
+    max_iterations: "1~2"

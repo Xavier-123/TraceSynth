@@ -38,12 +38,9 @@ def apply_complexity_cli_overrides(config: Dict[str, Any], args: argparse.Namesp
     overrides: Dict[str, Dict[str, str]] = {"task_complexity": {}, "iteration_complexity": {}}
     mapping = {
         "num_tools": ("task_complexity", "num_tools"),
-        "num_tool_categories": ("task_complexity", "num_tool_categories"),
-        "num_pipeline_stages": ("task_complexity", "num_pipeline_stages"),
         "num_custom_tools": ("task_complexity", "num_custom_tools"),
         "distractor_tools": ("task_complexity", "distractor_tools"),
-        "retrieval_rounds": ("iteration_complexity", "retrieval_rounds"),
-        "info_gaps": ("iteration_complexity", "info_gaps"),
+        "max_iterations": ("iteration_complexity", "max_iterations"),
     }
     for arg_name, (section, key) in mapping.items():
         value = getattr(args, arg_name, None)
@@ -69,13 +66,10 @@ def main():
     parser.add_argument('--config', type=str, default=str(PROJECT_ROOT / 'configs' / 'tool_use_data_gen.yaml'),
                        help='Path to the configuration file')
     complexity = parser.add_argument_group('synthesis complexity overrides')
-    complexity.add_argument('--num-tools', type=str, help='e.g. "2~4"')
-    complexity.add_argument('--num-tool-categories', type=str, help='e.g. "2~3"')
-    complexity.add_argument('--num-pipeline-stages', type=str, help='e.g. "4~6"')
+    complexity.add_argument('--num-tools', type=str, help='e.g. "4~6"')
     complexity.add_argument('--num-custom-tools', type=str, help='e.g. "1"')
     complexity.add_argument('--distractor-tools', type=str, help='e.g. "1~2"')
-    complexity.add_argument('--retrieval-rounds', type=str, help='e.g. "1~2", use "0" for no iteration')
-    complexity.add_argument('--info-gaps', type=str, help='e.g. "1~3"')
+    complexity.add_argument('--max-iterations', type=str, help='e.g. "1~2", use "0" for no iteration')
     args = parser.parse_args()
     
     # Load configuration from YAML file
