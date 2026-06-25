@@ -78,8 +78,14 @@ from .prompt import tool_set_prompt
 # <workflow>(High-level detailed steps, it must follow the restriction above. Do not require specifying tool call parameters.)</workflow>
 # """
 
-def generate_tool_set(cfg, background_info):
-    prompt = tool_set_prompt.format(background_info=background_info)
+def generate_tool_set(cfg, background_info, complexity=None):
+    from tracesynth.configuration import SynthesisComplexity
+    if complexity is None:
+        complexity = SynthesisComplexity()
+    prompt = tool_set_prompt.format(
+        background_info=background_info,
+        **complexity.to_prompt_vars(),
+    )
     messages = call_llm_api(
         user_prompt=prompt,
         system_prompt="",
@@ -88,6 +94,7 @@ def generate_tool_set(cfg, background_info):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     all_content = messages[-1]["content"]

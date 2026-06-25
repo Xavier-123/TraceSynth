@@ -47,10 +47,15 @@ from .prompt import tool_simulation_prompt_with_memory
 # </new_bg_introduced>
 # """
 
-def mock_tool_response(cfg, query, tool_description, history_interactions):
+def mock_tool_response(cfg, query, tool_description, history_interactions, complexity=None):
+    from tracesynth.configuration import SynthesisComplexity
+    if complexity is None:
+        complexity = SynthesisComplexity()
     prompt = tool_simulation_prompt_with_memory.format(
-        query=query, tools=tool_description,
-        world_state=json.dumps(history_interactions)
+        query=query,
+        tools=tool_description,
+        world_state=json.dumps(history_interactions),
+        **complexity.to_prompt_vars(),
     )
     messages = call_llm_api(
         user_prompt=prompt,
@@ -60,6 +65,7 @@ def mock_tool_response(cfg, query, tool_description, history_interactions):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     all_content = messages[-1]["content"]

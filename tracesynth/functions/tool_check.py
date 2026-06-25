@@ -47,8 +47,15 @@ from .prompt import tool_check_prompt
 # """
 
 
-def tool_check(cfg, tool_description, task_description):
-    prompt = tool_check_prompt.format(task_description=task_description, tool_description=tool_description)
+def tool_check(cfg, tool_description, task_description, complexity=None):
+    from tracesynth.configuration import SynthesisComplexity
+    if complexity is None:
+        complexity = SynthesisComplexity()
+    prompt = tool_check_prompt.format(
+        task_description=task_description,
+        tool_description=tool_description,
+        **complexity.to_prompt_vars(),
+    )
     messages = call_llm_api(
         user_prompt=prompt,
         system_prompt="",
@@ -57,6 +64,7 @@ def tool_check(cfg, tool_description, task_description):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     all_content = messages[-1]["content"]

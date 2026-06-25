@@ -11,6 +11,7 @@ def call_llm_messages(
     model_name: str,
     max_tokens: int,
     temperature: float,
+    use_thinking: bool = False,
 ):
     client = OpenAI(api_key=api_key, base_url=api_base)
     
@@ -18,7 +19,10 @@ def call_llm_messages(
         model=model_name,
         messages=messages,
         temperature=temperature,
-        extra_body={"max_completion_tokens": max_tokens}
+        extra_body={
+            "enable_thinking": use_thinking,
+            "max_completion_tokens": max_tokens,
+        }
     )
     response_content = response.choices[0].message.content
     messages.append(
@@ -36,6 +40,7 @@ def solve_task_by_tools(cfg, solve_history):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     think_and_tool_call = messages[-1]["content"]

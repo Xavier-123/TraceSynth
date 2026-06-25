@@ -41,8 +41,14 @@ from .prompt import fuzzy_task_prompt
 # - Because the tools are virtual and simulated by a large language model, if the task involves real people or events, it may lead to discrepancies between tool output and reality. Therefore, when constructing the task, use virtual characters, events, and locations.
 # - When generating any virtual entities, always prefix their names with the word 'virtual', e.g., 'Virtual band Windhowl', 'Virtual city Aurora Falls'.
 
-def generate_fuzzy_task(cfg, initial_task_info):
-    prompt = fuzzy_task_prompt.format(initial_task_info=initial_task_info)
+def generate_fuzzy_task(cfg, initial_task_info, complexity=None):
+    from tracesynth.configuration import SynthesisComplexity
+    if complexity is None:
+        complexity = SynthesisComplexity()
+    prompt = fuzzy_task_prompt.format(
+        initial_task_info=initial_task_info,
+        **complexity.to_prompt_vars(),
+    )
     messages = call_llm_api(
         user_prompt=prompt,
         system_prompt="",
@@ -51,6 +57,7 @@ def generate_fuzzy_task(cfg, initial_task_info):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     all_content = messages[-1]["content"]

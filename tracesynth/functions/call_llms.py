@@ -9,6 +9,7 @@ def call_llm_api(
     model_name: str,
     max_tokens: int,
     temperature: float,
+    use_thinking: bool = False,
 ):
     client = OpenAI(api_key=api_key, base_url=api_base)
     # try:
@@ -28,7 +29,7 @@ def call_llm_api(
         messages=messages,
         temperature=temperature,
         extra_body={
-            "enable_thinking": False,
+            "enable_thinking": use_thinking,
             "max_completion_tokens": max_tokens,
         },
     )

@@ -25,4 +25,4 @@ api_configs:
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
   "deepseek-ai/DeepSeek-V4-Flash":
     api_base: "https://api.siliconflow.cn/v1"
-    api_key_env: "sk-cezacorttpergezkrihnlnauodcnlbwegumyinbhvjcxiyfd"
+    api_key_env: "SILICONFLOW_API_KEY"

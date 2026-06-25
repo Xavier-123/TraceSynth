@@ -20,6 +20,10 @@ step_models:
     name: "qwen3-235b-a22b-instruct-2507"
     max_tokens: 10240
     temperature: 0.9
+  MockUserAgent:
+    name: "qwen3-235b-a22b-instruct-2507"
+    max_tokens: 10240
+    temperature: 0.9
 
 processing:
   max_workers: 1
@@ -27,6 +31,7 @@ processing:
 
 logging:
   task_file_path: "../output/virtual_tool_use.jsonl"
+  failed_task_file_path: "../output/virtual_tool_use.failed.jsonl"
   solve_path: "../output/solve_tool_use/"
 
 paths:
@@ -43,6 +48,14 @@ api_configs:
     api_base: "http://0.0.0.0:8000/v1"
     api_key_env: EMPTY
 
-tool_set_gen:
-  num_tools: "1~2"
-  num_sub: "2~4"
+# Agentic RAG 数据合成复杂度
+synthesis:
+  task_complexity:
+    num_tools: "1~2"
+    num_tool_categories: "2~2"
+    num_pipeline_stages: "2~4"
+    num_custom_tools: "1"
+    distractor_tools: "1~2"
+  iteration_complexity:
+    retrieval_rounds: "0~1"
+    info_gaps: "1~2"

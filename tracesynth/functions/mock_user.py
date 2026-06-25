@@ -42,6 +42,7 @@ def mock_user_response(cfg, task, background, restrict, interaction):
         model_name=cfg.model_name,
         max_tokens=cfg.max_tokens,
         temperature=cfg.temperature,
+        use_thinking=cfg.use_thinking,
     )
     
     all_content = messages[-1]["content"]

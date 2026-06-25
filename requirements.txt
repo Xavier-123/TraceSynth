@@ -1,5 +1,7 @@
 openai
-dotenv
+python-dotenv
 pyyaml
 langgraph
+langchain-core
+pydantic
 datasets
