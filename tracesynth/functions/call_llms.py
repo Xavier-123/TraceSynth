@@ -56,15 +56,35 @@ def create_chat_completion_with_retry(
 
     for attempt in range(api_max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                extra_body={
-                    "enable_thinking": use_thinking,
-                    "max_completion_tokens": max_tokens,
-                },
-            )
+            if api_base in ["https://apihub.agnes-ai.com/v1"]:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body={
+                        "enable_thinking": use_thinking,
+                        "max_completion_tokens": max_tokens,
+                    },
+                )
+            elif api_base in ["https://api.siliconflow.cn/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"]:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                )
+            else:
+                logger.warning("Using default API base!!!")
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body={
+                    },
+                )
+
             return response.choices[0].message.content or ""
         except Exception as exc:
             last_exc = exc

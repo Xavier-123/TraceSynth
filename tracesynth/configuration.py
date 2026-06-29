@@ -112,7 +112,7 @@ class ModelConfiguration(BaseModel):
     temperature: float = Field(default=0.4, description="模型的温度参数。")
     max_tokens: int = Field(default=8192, description="模型生成的最大 token 数。")
     use_tools: bool = Field(default=True, description="是否使用工具。")
-    use_thinking: bool = Field(default=True, description="是否使用思考模式。")
+    use_thinking: bool = Field(default=False, description="是否使用思考模式。")
     api_configs: Dict[str, Dict[str, str]] = Field(default=None, description="不同模型的API配置映射。")
     api_max_retries: int = Field(default=3, description="API 瞬时错误最大尝试次数。")
     api_retry_base: float = Field(default=1.0, description="API 重试指数退避基数（秒）。")

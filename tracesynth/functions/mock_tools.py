@@ -6,10 +6,10 @@ from .prompt import tool_simulation_prompt_with_memory
 
 def _parse_mock_tool_response(content: str):
     tool_response_matches = re.findall(
-        r"<tool_response_start>(.+?)</tool_response_end>", content, re.DOTALL,
+        r"<tool_response>(.+?)</tool_response>", content, re.DOTALL,
     )
     if not tool_response_matches:
-        raise ParseError("missing <tool_response_start> tag")
+        raise ParseError("missing <tool_response> tag")
 
     tool_response = tool_response_matches[-1].strip()
     new_bg_introduced_matches = re.findall(
@@ -23,7 +23,15 @@ def _parse_mock_tool_response(content: str):
     return tool_response, "YES" in new_bg_introduced
 
 
-def mock_tool_response(cfg, query, tool_description, history_interactions, complexity=None):
+def mock_tool_response(
+    cfg,
+    query,
+    tool_description,
+    history_interactions,
+    complexity=None,
+    label: str = "",
+    context: str = "",
+):
     from tracesynth.configuration import SynthesisComplexity
     if complexity is None:
         complexity = SynthesisComplexity()
@@ -31,6 +39,8 @@ def mock_tool_response(cfg, query, tool_description, history_interactions, compl
         query=query,
         tools=tool_description,
         world_state=json.dumps(history_interactions),
+        label=label or "（未提供）",
+        context=context or "（未提供）",
         **complexity.to_prompt_vars(),
     )
     messages = [

@@ -11,6 +11,11 @@ from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
 from tracesynth.configuration import ModelConfiguration, SynthesisComplexity
+from tracesynth.io import (
+    validate_seed_info,
+    extract_predicted_answer,
+    check_label_match,
+)
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
     mock_tool_response, solve_task_by_tools, mock_user_response
@@ -146,6 +151,10 @@ def get_synthesis_complexity(config: RunnableConfig) -> SynthesisComplexity:
     return SynthesisComplexity.from_run_config(config.get("configurable", {}))
 
 
+def is_supervised_seed(seed_info: Dict[str, Any]) -> bool:
+    return bool(seed_info.get("label") and seed_info.get("question"))
+
+
 def toolset_gen_node(state: AgentState, config: RunnableConfig):
     logger.info("------------------ToolSetGenAgent------------------")
 
@@ -154,9 +163,10 @@ def toolset_gen_node(state: AgentState, config: RunnableConfig):
     cfg = ModelConfiguration.from_runnable_config(step_config)
     complexity = get_synthesis_complexity(config)
 
-    original_bg = state["seed_info"]["background"]
+    seed_info = state["seed_info"]
+    background_info = seed_info.get("background") or seed_info.get("question", "")
     all_content, task, tools, workflow, restrict = generate_tool_set(
-        cfg=cfg, background_info=original_bg, complexity=complexity,
+        cfg=cfg, background_info=background_info, complexity=complexity,
     )
     if not all(is_non_empty_text(value) for value in (all_content, task, tools, workflow, restrict)):
         return build_failure(
@@ -183,6 +193,35 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
     logger.info("------------------FuzzyTaskAgent------------------")
     if state["breaked"]:
         return {}
+
+    seed_info = state["seed_info"]
+    if is_supervised_seed(seed_info):
+        fuzzy_task = seed_info["question"]
+        task_background_parts = []
+        if seed_info.get("context"):
+            task_background_parts.append(seed_info["context"])
+        step_config = create_step_config(config, "FuzzyTaskAgent")
+        cfg = ModelConfiguration.from_runnable_config(step_config)
+        initial_toolset_create = state["initial_toolset_create"]
+        complexity = get_synthesis_complexity(config)
+        _, generated_background = generate_fuzzy_task(
+            cfg=cfg, initial_task_info=initial_toolset_create, complexity=complexity,
+        )
+        if is_non_empty_text(generated_background):
+            task_background_parts.append(generated_background)
+        task_background = "\n\n".join(task_background_parts).strip()
+        if not is_non_empty_text(task_background):
+            return build_failure(
+                "FuzzyTaskAgent did not return task/background in supervised mode",
+                **{
+                    "fuzzy_task": fuzzy_task,
+                    "task_background": task_background,
+                },
+            )
+        return {
+            "fuzzy_task": fuzzy_task,
+            "task_background": task_background,
+        }
 
     # Create step-specific configuration
     step_config = create_step_config(config, "FuzzyTaskAgent")
@@ -332,7 +371,13 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     solve_history = state["solve_history"]
 
     tool_response, new_bg_introduced = mock_tool_response(
-        cfg, tool_call, tools_description, tool_call_history, complexity=get_synthesis_complexity(config),
+        cfg,
+        tool_call,
+        tools_description,
+        tool_call_history,
+        complexity=get_synthesis_complexity(config),
+        label=state["seed_info"].get("label", ""),
+        context=state["seed_info"].get("context", "") or "",
     )
     if tool_response is None:
         return build_failure("MockToolAgent returned no tool response", **{"solve_history": solve_history})
@@ -420,12 +465,16 @@ def save_architecture_diagram(output_path: str) -> None:
 
 # --- 运行入口 ---
 def run_agent(seed_info: dict, run_config: dict = None):
+    run_config = run_config or {}
+    seed_info = validate_seed_info(seed_info)
     virtual_tool_use_task_path = run_config["logging"]["task_file_path"]
     failed_task_path = run_config["logging"].get(
         "failed_task_file_path",
         f"{virtual_tool_use_task_path}.failed",
     )
     solve_path = run_config["logging"]["solve_path"]
+    eval_cfg = run_config.get("evaluation") or {}
+    skip_label_match = bool(eval_cfg.get("skip_label_match", False))
 
     log_dir = os.path.dirname(virtual_tool_use_task_path)
     if log_dir and not os.path.exists(log_dir):
@@ -455,6 +504,9 @@ def run_agent(seed_info: dict, run_config: dict = None):
     if not is_successful_final_state(final_state):
         failure_data = {
             "id": seed_info["id"],
+            "question": seed_info.get("question"),
+            "label": seed_info.get("label"),
+            "context_present": bool(seed_info.get("context")),
             "failure_reason": final_state.get("failure_reason", "generation did not produce a valid final answer"),
             "fuzzy_task": final_state.get("fuzzy_task"),
             "checked_tools": final_state.get("checked_tools"),
@@ -466,10 +518,41 @@ def run_agent(seed_info: dict, run_config: dict = None):
                 f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
         return final_state
 
+    predicted_answer = extract_predicted_answer(final_state.get("solve_history"))
+    label_check = check_label_match(
+        predicted_answer,
+        seed_info.get("label", ""),
+        skip=skip_label_match,
+    )
+    if label_check["label_match_status"] == "mismatch":
+        failure_data = {
+            "id": seed_info["id"],
+            "question": seed_info.get("question"),
+            "label": seed_info.get("label"),
+            "context_present": bool(seed_info.get("context")),
+            "failure_reason": "predicted answer does not match label",
+            "fuzzy_task": final_state.get("fuzzy_task"),
+            "checked_tools": final_state.get("checked_tools"),
+            **label_check,
+        }
+        with log_file_lock:
+            with open(failed_task_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(failure_data, ensure_ascii=False) + '\n')
+            with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
+                f.write(json.dumps({**final_state, **label_check}, ensure_ascii=False, indent=4) + '\n')
+        return {**final_state, **label_check, "breaked": True, "failure_reason": failure_data["failure_reason"]}
+
     save_data = {
         "id": seed_info["id"],
+        "question": seed_info.get("question"),
+        "label": seed_info.get("label"),
+        "context_present": bool(seed_info.get("context")),
         "fuzzy_task": final_state["fuzzy_task"],
         "checked_tools": final_state["checked_tools"],
+        "artifact_dir": solve_path,
+        "predicted_answer": predicted_answer,
+        "label_match_status": label_check["label_match_status"],
+        "match_score": label_check.get("match_score"),
     }
 
     with log_file_lock:
@@ -483,6 +566,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
 
         next_number = max(existing_numbers) + 1 if existing_numbers else 1
         solution_filename = f"{solve_path}/solution{next_number}.json"
+        save_data["solution_file"] = os.path.basename(solution_filename)
 
         with open(solution_filename, 'w', encoding='utf-8') as f:
             f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
@@ -491,9 +575,16 @@ def run_agent(seed_info: dict, run_config: dict = None):
             f.write(json.dumps(final_state["tool_call_history"], ensure_ascii=False, indent=4) + '\n')
 
         more_info = {
+            "question": seed_info.get("question"),
+            "label": seed_info.get("label"),
+            "context": seed_info.get("context"),
+            "context_present": bool(seed_info.get("context")),
             "restrict": final_state["restrict"],
             "task_background": final_state["task_background"],
             "initial_workflow": final_state["initial_workflow"],
+            "predicted_answer": predicted_answer,
+            "label_match_status": label_check["label_match_status"],
+            "match_score": label_check.get("match_score"),
             "synthesis_complexity": SynthesisComplexity.from_run_config(
                 run_config.get("configurable", {})
             ).model_dump(),
@@ -511,15 +602,8 @@ if __name__ == "__main__":
     with open("configs/tool_use_data_gen.yaml", 'r', encoding='utf-8') as f:
         agent_config = yaml.safe_load(f)
 
-    # Example usage
-    task = {"id": "2e9f925f-0299-4255-82ed-b8bb2dc9627e",
-            "background": "a passionate fan of Afrikaans music and die-hard supporter of Spoegwolf"}
-    with open("configs/persona.jsonl", 'r', encoding='utf-8') as f:
-        tasks = [json.loads(line) for line in f]
+    with open("configs/seed_qa_sample.jsonl", 'r', encoding='utf-8') as f:
+        tasks = [json.loads(line) for line in f if line.strip()]
 
     for task in tasks:
-        new_task = {
-            "id": task["id"],
-            "background": task["persona"]
-        }
-        run_agent(new_task, run_config=agent_config)
+        run_agent(task, run_config=agent_config)

@@ -235,8 +235,8 @@ def run_agent(seed_info: dict, run_config: dict = None):
         initial_state = {
             "fuzzy_task": seed_info["fuzzy_task"],
             "checked_tools": seed_info["checked_tools"],
-            "task_background": more_info["task_background"],
-            "restrict": more_info["restrict"],
+            "task_background": more_info.get("task_background", ""),
+            "restrict": more_info.get("restrict", ""),
             "breaked": False,
             "task_finished": False,
             "solve_history": [],
