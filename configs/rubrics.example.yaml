@@ -2,6 +2,8 @@
 step_models:
   RubricsAgent:
     name: "deepseek-ai/DeepSeek-V4-Flash"
+    api_base: "https://api.siliconflow.cn/v1"
+    api_key_env: "SILICONFLOW_API_KEY"
     max_tokens: 40000
     temperature: 0.9
     solution_top_k: 3
@@ -15,14 +17,3 @@ logging:
 
 paths:
   solution_path: "../output/solve_tool_use/"
-
-api_configs:
-  "Qwen3-235B-A22B-Instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY"
-  "qwen3-235b-a22b-instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
-  "deepseek-ai/DeepSeek-V4-Flash":
-    api_base: "https://api.siliconflow.cn/v1"
-    api_key_env: "SILICONFLOW_API_KEY"

@@ -72,7 +72,7 @@ def create_chat_completion_with_retry(
                     messages=messages,
                     temperature=temperature,
                     extra_body={
-                        "chat_template_kwargs": {"enable_thinking": False},
+                        "chat_template_kwargs": {"enable_thinking": use_thinking},
                     },
                 )
             else:
@@ -166,16 +166,19 @@ def call_and_parse(
     parse_fn: Callable[[str], T],
     *,
     step_name: str = "LLM",
+    feedback_on_error: bool = True,
 ) -> tuple[Optional[T], List[Dict[str, str]]]:
     """Call LLM with API retry; on parse failure, resample up to parse_max_retries times."""
     parse_max_retries = getattr(cfg, "parse_max_retries", 2)
     total_attempts = parse_max_retries + 1
     last_error: Optional[str] = None
+    working_messages = list(messages)
+    last_content: Optional[str] = None
 
     for attempt in range(total_attempts):
         try:
             result_messages = call_llm_messages(
-                messages=messages,
+                messages=working_messages,
                 api_base=cfg.api_base,
                 api_key=cfg.api_key,
                 model_name=cfg.model_name,
@@ -186,6 +189,7 @@ def call_and_parse(
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
             )
             content = result_messages[-1]["content"]
+            last_content = content
             parsed = parse_fn(content)
             if parsed is None:
                 raise ParseError("parse_fn returned None")
@@ -200,6 +204,20 @@ def call_and_parse(
                     total_attempts,
                     last_error,
                 )
+                if feedback_on_error and last_content is not None:
+                    working_messages = list(working_messages)
+                    working_messages.append(
+                        {"role": "assistant", "content": last_content},
+                    )
+                    working_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"上一次输出无法解析：{last_error}。"
+                                "请严格按要求的标签格式重新输出。"
+                            ),
+                        },
+                    )
             else:
                 logger.warning(
                     "%s parse failed after %d attempts: %s",

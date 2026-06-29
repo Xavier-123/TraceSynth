@@ -109,41 +109,36 @@ class ModelConfiguration(BaseModel):
     model_name: str = Field(default=None, description="代理使用的模型名称。")
     api_base: str = Field(default=None, description="可选的 API 地址。")
     api_key: str = Field(default=None, description="可选的 API 密钥。")
+    api_key_env: Optional[str] = Field(default=None, description="API 密钥对应的环境变量名。")
     temperature: float = Field(default=0.4, description="模型的温度参数。")
     max_tokens: int = Field(default=8192, description="模型生成的最大 token 数。")
     use_tools: bool = Field(default=True, description="是否使用工具。")
     use_thinking: bool = Field(default=False, description="是否使用思考模式。")
-    api_configs: Dict[str, Dict[str, str]] = Field(default=None, description="不同模型的API配置映射。")
     api_max_retries: int = Field(default=3, description="API 瞬时错误最大尝试次数。")
     api_retry_base: float = Field(default=1.0, description="API 重试指数退避基数（秒）。")
     parse_max_retries: int = Field(default=2, description="输出解析失败后的最大重采样次数。")
     tool_call_max_retries: int = Field(default=3, description="Solver 非法 tool_call 自纠错最大次数。")
+
     @classmethod
     def from_runnable_config(cls, config: Optional[RunnableConfig] = None) -> "ModelConfiguration":
         """从 RunnableConfig 创建一个 Configuration 实例。"""
         configurable: dict[str, Any] = config.get("configurable", {}) if config else {}
         fields = getattr(cls, "model_fields", cls.__fields__)
-    
+
         raw_values: Dict[str, Any] = {
             name: configurable.get(name, field.default)
             for name, field in fields.items()
         }
 
         values = {k: v for k, v in raw_values.items() if v is not None}
-        
-        # Handle API configuration based on model name
-        model_name = values["model_name"]
-        api_configs = values["api_configs"]
-        
-        # Find the API config for this model, or use default
-        model_api_config = api_configs.get(model_name, api_configs.get("default", {}))
-        
-        # Set api_base and api_key based on the model's API config
-        if "api_base" not in values and "api_base" in model_api_config:
-            values["api_base"] = os.getenv(model_api_config["api_base"], model_api_config["api_base"])
-        
-        if "api_key" not in values and "api_key_env" in model_api_config:
-            api_key_env = model_api_config["api_key_env"]
+
+        model_name = values.get("model_name")
+
+        if "api_base" in values:
+            values["api_base"] = os.getenv(values["api_base"], values["api_base"])
+
+        if "api_key" not in values and "api_key_env" in values:
+            api_key_env = values.pop("api_key_env")
             if api_key_env in ("", "EMPTY", None):
                 values["api_key"] = ""
             elif isinstance(api_key_env, str) and api_key_env.startswith("sk-"):
@@ -155,6 +150,8 @@ class ModelConfiguration(BaseModel):
                 if api_key is None:
                     raise ValueError(f"Missing environment variable '{api_key_env}' for model '{model_name}'")
                 values["api_key"] = api_key
-        
+        elif "api_key_env" in values:
+            values.pop("api_key_env")
+
         return cls(**values)
 

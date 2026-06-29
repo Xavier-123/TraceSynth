@@ -101,7 +101,7 @@ WANLAI_API_KEY=your_key
 AGNES_API_KEY=your_key
 ```
 
-密钥通过 `configs/tool_use_data_gen.yaml` 中 `api_configs` 的 `api_key_env` 字段引用环境变量名（**不要**将密钥直接写入 yaml）。
+密钥通过 `configs/tool_use_data_gen.yaml` 中 `step_models` 各步骤的 `api_key_env` 字段引用环境变量名（**不要**将密钥直接写入 yaml）。
 
 ### 3. 准备种子数据
 
@@ -152,12 +152,14 @@ python scripts/tool_use_data_gen.py \
 
 ### step_models — 各步骤模型
 
-为 6 个 Agent 节点分别指定模型、温度、max_tokens：
+为 6 个 Agent 节点分别指定模型、API 地址、密钥环境变量、温度、max_tokens：
 
 ```yaml
 step_models:
   ToolSetGenAgent:
     name: "gpt-5.4"
+    api_base: "https://api.example.com/v1"
+    api_key_env: "EXAMPLE_API_KEY"
     max_tokens: 10240
     temperature: 0.9
   # FuzzyTaskAgent, ToolCheckAgent, SolveAgent, MockToolAgent, MockUserAgent ...

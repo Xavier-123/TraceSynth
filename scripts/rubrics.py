@@ -471,13 +471,16 @@ if __name__ == "__main__":
     load_dotenv()
     load_dotenv(".local.env", override=True)
 
-    model_name = agent_config["step_models"]["RubricsAgent"]["name"]
-    model_api_config = agent_config["api_configs"][model_name]
-    API_BASE = os.getenv(model_api_config["api_base"], model_api_config["api_base"])
-    API_KEY = os.getenv(model_api_config["api_key_env"], model_api_config["api_key_env"])
+    rubrics_step = agent_config["step_models"]["RubricsAgent"]
+    model_name = rubrics_step["name"]
+    API_BASE = os.getenv(rubrics_step["api_base"], rubrics_step["api_base"])
+    api_key_env = rubrics_step["api_key_env"]
+    API_KEY = "" if api_key_env in ("", "EMPTY", None) else os.getenv(api_key_env)
+    if API_KEY is None:
+        raise ValueError(f"Missing environment variable '{api_key_env}' for model '{model_name}'")
     MODEL_NAME = model_name
 
-    solution_top_k = agent_config["step_models"]["RubricsAgent"]["solution_top_k"]
+    solution_top_k = rubrics_step["solution_top_k"]
     solution_path = agent_config["paths"]["solution_path"]
     already_processed_path = agent_config["logging"]["already_processed_path"]
 

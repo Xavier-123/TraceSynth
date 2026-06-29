@@ -2,10 +2,14 @@
 step_models:
   SolveAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   MockToolAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
 
@@ -20,15 +24,3 @@ logging:
 
 paths:
   data_file: "../output/virtual_tool_use.jsonl"
-
-api_configs:
-  "Qwen3-235B-A22B-Instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY"
-  "qwen3-235b-a22b-instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
-  "Local":
-    api_base: "http://0.0.0.0:8000/v1"
-    api_key_env: EMPTY
-

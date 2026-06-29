@@ -52,9 +52,11 @@ def create_step_config(
         step_config["configurable"]["use_tools"] = step_model_config["use_tools"]
     if "use_thinking" in step_model_config:
         step_config["configurable"]["use_thinking"] = step_model_config["use_thinking"]
+    if "api_base" in step_model_config:
+        step_config["configurable"]["api_base"] = step_model_config["api_base"]
+    if "api_key_env" in step_model_config:
+        step_config["configurable"]["api_key_env"] = step_model_config["api_key_env"]
 
-    step_config["configurable"]["api_configs"] = base_config["configurable"]["api_configs"]
-    
     return step_config
 def solve_task_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:

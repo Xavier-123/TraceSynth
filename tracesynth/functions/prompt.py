@@ -257,6 +257,8 @@ tool_simulation_prompt_with_memory = """
    - YES = 新增文档/实体/关系须存档；NO = 仅返回已有知识的检索视图
 
 请将模拟生成的工具返回内容放置在 <tool_response> 与 </tool_response> 标签之间，紧随其后用 <new_bg_introduced> 与 </new_bg_introduced> 标注是否新增背景。
+
+### 工具返回内容
 <tool_response>
 此处填写模拟后的工具返回内容……
 </tool_response>

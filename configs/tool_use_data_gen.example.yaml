@@ -2,26 +2,38 @@
 step_models:
   ToolSetGenAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   FuzzyTaskAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   ToolCheckAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   SolveAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   MockToolAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
   MockUserAgent:
     name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
 
@@ -42,17 +54,6 @@ logging:
 
 paths:
   data_file: "../configs/persona_5K.jsonl"
-
-api_configs:
-  "Qwen3-235B-A22B-Instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY"
-  "qwen3-235b-a22b-instruct-2507":
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
-  "Local":
-    api_base: "http://0.0.0.0:8000/v1"
-    api_key_env: EMPTY
 
 # Agentic RAG 数据合成复杂度（6 步流程，4 个参数）
 synthesis:
