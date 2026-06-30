@@ -56,7 +56,7 @@ def create_chat_completion_with_retry(
 
     for attempt in range(api_max_retries):
         try:
-            if api_base in ["https://apihub.agnes-ai.com/v1"]:
+            if api_base in ["https://apihub.agnes-ai.com/v1", "https://api-inference.modelscope.cn/v1"]:
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -188,6 +188,10 @@ def call_and_parse(
                 api_max_retries=getattr(cfg, "api_max_retries", 3),
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
             )
+        except Exception as exc:
+            print(exc)
+
+        try:
             content = result_messages[-1]["content"]
             last_content = content
             parsed = parse_fn(content)
@@ -225,5 +229,8 @@ def call_and_parse(
                     total_attempts,
                     last_error,
                 )
+
+        except Exception as exc:
+            print(exc)
 
     return None, messages

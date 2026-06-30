@@ -100,13 +100,24 @@ def validate_tool_call(tool_call: str, checked_tools: List[Dict[str, Any]]) -> t
     return True, None
 
 
-def is_successful_final_state(final_state: Dict[str, Any]) -> bool:
-    return (
-        not final_state.get("breaked")
-        and isinstance(final_state.get("checked_tools"), list)
-        and bool(final_state["checked_tools"])
-        and has_final_answer(final_state.get("solve_history"))
-    )
+# def is_successful_final_state(final_state: Dict[str, Any]) -> bool:
+#     return (
+#         not final_state.get("breaked")
+#         and isinstance(final_state.get("checked_tools"), list)
+#         and bool(final_state["checked_tools"])
+#         and has_final_answer(final_state.get("solve_history"))
+#     )
+
+def is_successful_final_state(final_state: Dict[str, Any], strict=False) -> bool:
+    if strict:
+        return (
+            not final_state.get("breaked")
+            and isinstance(final_state.get("checked_tools"), list)
+            and bool(final_state["checked_tools"])
+            and has_final_answer(final_state.get("solve_history"))
+        )
+    else:
+        return not final_state.get("breaked") and has_final_answer(final_state.get("solve_history"))
 
 
 def create_step_config(
@@ -250,7 +261,7 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
 
 
 def check_tools_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------CheckToolsAgent------------------")
+    logger.info("------------------ToolCheckAgent------------------")
 
     if state["breaked"]:
         return {}
@@ -360,7 +371,6 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
 
 def mock_tools_node(state: AgentState, config: RunnableConfig):
     logger.info("------------------MockToolsAgent------------------")
-
     if state["breaked"]:
         return {}
 
@@ -395,7 +405,6 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
         "tool_call_history": tool_call_history,
         "solve_history": solve_history
     }
-
 
 def mock_user_node(state: AgentState, config: RunnableConfig):
     logger.info("------------------MockUserAgent------------------")

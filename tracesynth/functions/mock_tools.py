@@ -1,52 +1,37 @@
 import json
 import re
+from typing import Tuple, Any, Dict, Union
 from .call_llms import ParseError, call_and_parse
 from .prompt import tool_simulation_prompt_with_memory
 
-_TOOL_RESPONSE_TAG_RE = re.compile(
-    r"<tool_response(?:\s[^>]*)?>(.+?)</tool_response>",
-    re.DOTALL | re.IGNORECASE,
-)
-_TOOL_RESPONSE_OPEN_RE = re.compile(
-    r"<tool_response(?:\s[^>]*)?>\s*(.+)$",
-    re.DOTALL | re.IGNORECASE,
-)
-_NEW_BG_TAG_RE = re.compile(
-    r"<new_bg_introduced(?:\s[^>]*)?>(.+?)</new_bg_introduced>",
-    re.DOTALL | re.IGNORECASE,
-)
-_STRUCTURED_TAG_RE = re.compile(r"<[a-zA-Z_][\w-]*(?:\s[^>]*)?>")
 
+def _parse_mock_tool_response(response_text: str) -> Tuple[Union[Dict[str, Any], str], bool]:
+    cleaned_text = response_text.strip()
 
-def _extract_tool_response(content: str) -> str | None:
-    matches = _TOOL_RESPONSE_TAG_RE.findall(content)
-    if matches:
-        return matches[-1].strip()
+    # 正则提取 Markdown 代码块中的 JSON 内容
+    json_block_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    match = re.search(json_block_pattern, cleaned_text)
+    if match:
+        json_str = match.group(1).strip()
+    else:
+        json_str = cleaned_text
 
-    open_match = _TOOL_RESPONSE_OPEN_RE.search(content)
-    if open_match:
-        return open_match.group(1).strip()
+    try:
+        parsed_data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"解析 JSON 失败。原始文本:\n{response_text}") from e
 
-    return None
+    # 提取字段
+    if "tool_response" not in parsed_data:
+        raise ValueError("JSON 数据中未包含必需的 'tool_response' 字段")
 
+    tool_response = parsed_data["tool_response"]
+    new_bg_introduced = parsed_data.get("new_bg_introduced", "NO")  # 若缺失默认返回 "NO"
 
-def _parse_new_bg_introduced(content: str) -> bool:
-    matches = _NEW_BG_TAG_RE.findall(content)
-    if matches:
-        return "YES" in matches[-1].strip().upper()
-    return True
-
-
-def _parse_mock_tool_response(content: str):
-    tool_response = _extract_tool_response(content)
-    if tool_response:
-        return tool_response, _parse_new_bg_introduced(content)
-
-    cleaned = content.strip()
-    if cleaned and not _STRUCTURED_TAG_RE.search(cleaned):
-        return cleaned, True
-
-    raise ParseError("missing <tool_response> tag")
+    if new_bg_introduced == "YES":
+        return tool_response, True
+    else:
+        return tool_response, False
 
 
 def mock_tool_response(
@@ -58,27 +43,32 @@ def mock_tool_response(
     label: str = "",
     context: str = "",
 ):
-    from tracesynth.configuration import SynthesisComplexity
-    if complexity is None:
-        complexity = SynthesisComplexity()
-    prompt = tool_simulation_prompt_with_memory.format(
-        query=query,
-        tools=tool_description,
-        world_state=json.dumps(history_interactions),
-        label=label or "（未提供）",
-        context=context or "（未提供）",
-        **complexity.to_prompt_vars(),
-    )
-    messages = [
-        {"role": "system", "content": ""},
-        {"role": "user", "content": prompt},
-    ]
-    parsed, _ = call_and_parse(
-        cfg,
-        messages,
-        _parse_mock_tool_response,
-        step_name="MockToolAgent",
-    )
-    if parsed is None:
-        return None, False
-    return parsed
+    try:
+        from tracesynth.configuration import SynthesisComplexity
+        if complexity is None:
+            complexity = SynthesisComplexity()
+        prompt = tool_simulation_prompt_with_memory.format(
+            query=query,
+            tools=tool_description,
+            world_state=json.dumps(history_interactions),
+            label=label or "（未提供）",
+            context=context or "（未提供）",
+            **complexity.to_prompt_vars(),
+        )
+        messages = [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": prompt},
+        ]
+        parsed, _ = call_and_parse(
+            cfg,
+            messages,
+            _parse_mock_tool_response,
+            step_name="MockToolAgent",
+        )
+        if parsed is None:
+            return None, False
+        return parsed
+    except Exception as e:
+        print(e)
+
+

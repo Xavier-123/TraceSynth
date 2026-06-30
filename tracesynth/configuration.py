@@ -41,7 +41,7 @@ class SynthesisComplexity(BaseModel):
     distractor_tools: str = Field(default="1~2", description="Number of distractor tools in tool_check.")
     max_iterations: str = Field(
         default="1~2",
-        description="Expected step5→2 retrieval iteration rounds in task design and solving.",
+        description="Expected step5 to step2 retrieval iteration rounds in task design and solving.",
     )
 
     @classmethod
@@ -80,7 +80,7 @@ class SynthesisComplexity(BaseModel):
             "无需迭代补检，单轮检索即可凑齐回答所需的全部信息。"
             if iter_hi == 0
             else (
-                f"须规划 {format_range(self.max_iterations, '轮')} 步骤5→2 检索迭代回路，"
+                f"须规划 {format_range(self.max_iterations, '轮')} 步骤5到步骤2 检索迭代回路，"
                 "每轮评估后根据缺口分析返回步骤2重新优化 Query 并补检。"
             )
         )
