@@ -160,6 +160,11 @@ def get_tool_call_max_retries(config: RunnableConfig) -> int:
     return int(retry_cfg.get("tool_call_max_retries", 3))
 
 
+def use_label_as_answer(config: RunnableConfig) -> bool:
+    eval_cfg = config.get("configurable", {}).get("evaluation") or {}
+    return bool(eval_cfg.get("use_label_as_answer", True))
+
+
 def get_synthesis_complexity(config: RunnableConfig) -> SynthesisComplexity:
     return SynthesisComplexity.from_run_config(config.get("configurable", {}))
 
@@ -360,6 +365,13 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
                 }
             task_finished = "Tool call"
     else:
+        if use_label_as_answer(config):
+            label = (state["seed_info"].get("label") or "").strip()
+            if label:
+                solve_history[-1] = {
+                    "role": "assistant",
+                    "content": f"<answer>{label}</answer>",
+                }
         task_finished = "Terminated"
 
     return {
