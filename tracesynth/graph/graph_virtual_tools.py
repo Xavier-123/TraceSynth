@@ -100,15 +100,7 @@ def validate_tool_call(tool_call: str, checked_tools: List[Dict[str, Any]]) -> t
     return True, None
 
 
-# def is_successful_final_state(final_state: Dict[str, Any]) -> bool:
-#     return (
-#         not final_state.get("breaked")
-#         and isinstance(final_state.get("checked_tools"), list)
-#         and bool(final_state["checked_tools"])
-#         and has_final_answer(final_state.get("solve_history"))
-#     )
-
-def is_successful_final_state(final_state: Dict[str, Any], strict=False) -> bool:
+def is_successful_final_state(final_state: Dict[str, Any], strict=True) -> bool:
     if strict:
         return (
             not final_state.get("breaked")

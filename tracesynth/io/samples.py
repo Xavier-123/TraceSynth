@@ -219,15 +219,6 @@ def load_seed_records(
     return records
 
 
-def iter_seed_records(
-    source_path: Union[str, Path],
-    input_config: Optional[InputConfig] = None,
-) -> Iterator[SeedRecord]:
-    """Stream seed records without filtering by processed ids."""
-    for record in load_seed_records(source_path, input_config=input_config):
-        yield record
-
-
 class TaskRecord(BaseModel):
     """Normalized synthesized task manifest row."""
 

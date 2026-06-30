@@ -189,7 +189,8 @@ def call_and_parse(
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
             )
         except Exception as exc:
-            print(exc)
+            logger.exception(f"%s API call failed; aborting parse loop {str(exc)}", step_name)
+            raise
 
         try:
             content = result_messages[-1]["content"]
@@ -229,8 +230,5 @@ def call_and_parse(
                     total_attempts,
                     last_error,
                 )
-
-        except Exception as exc:
-            print(exc)
 
     return None, messages
