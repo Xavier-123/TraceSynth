@@ -105,7 +105,7 @@ AGNES_API_KEY=your_key
 
 ### 3. 准备种子数据
 
-监督 QA 种子数据默认使用 [`configs/seed_qa_sample.jsonl`](configs/seed_qa_sample.jsonl)，每行一条 JSON：
+监督 QA 种子数据默认使用 [`data/seed_qa_sample.jsonl`](data/seed_qa_sample.jsonl)，每行一条 JSON：
 
 ```json
 {
@@ -178,10 +178,12 @@ step_models:
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `api_max_retries` | `3` | API 瞬时错误（超时/限流/5xx）最大尝试次数 |
+| `api_max_retries` | `3` | API transient errors (timeout/rate limit/5xx) total attempts, including the first call |
 | `api_retry_base` | `1.0` | 指数退避基数（秒） |
-| `parse_max_retries` | `2` | LLM 输出解析失败后的重采样次数 |
+| `parse_max_retries` | `2` | Extra LLM resampling attempts after output parse failure; total parse attempts are `parse_max_retries + 1` |
 | `tool_call_max_retries` | `3` | Solver 非法 tool_call 自纠错次数 |
+
+> With defaults, one `call_and_parse` can make up to `api_max_retries * (parse_max_retries + 1) = 3 * (2 + 1) = 9` underlying API requests in the worst case.
 
 ### processing — 批处理
 

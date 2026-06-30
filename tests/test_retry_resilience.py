@@ -13,14 +13,32 @@ from tracesynth.configuration import ModelConfiguration
 from tracesynth.functions.call_llms import (
     ParseError,
     call_and_parse,
+    create_chat_completion_with_retry,
     is_retryable_api_error,
     messages_for_chat_completion,
 )
 from tracesynth.functions.fuzzy_task import _parse_fuzzy_task_response
-from tracesynth.functions.mock_tools import _parse_mock_tool_response
+from tracesynth.functions.mock_tools import _parse_mock_tool_response, mock_tool_response
 from tracesynth.functions.mock_user import _parse_mock_user_response
 from tracesynth.functions.tool_check import _parse_checked_tools
-from tracesynth.graph.graph_virtual_tools import get_tool_call_max_retries, should_call_tool, validate_tool_call
+from tracesynth.graph.graph_virtual_tools import (
+    get_tool_call_max_retries,
+    should_call_tool,
+    solve_task_node,
+    validate_tool_call,
+)
+
+
+class RetryCfg:
+    api_base = "http://test"
+    api_key = "k"
+    model_name = "m"
+    max_tokens = 100
+    temperature = 0.1
+    use_thinking = False
+    api_max_retries = 1
+    api_retry_base = 0.01
+    parse_max_retries = 2
 
 
 def test_is_retryable_api_error():
@@ -54,17 +72,6 @@ def test_parse_fuzzy_task():
 
 
 def test_call_and_parse_resampling():
-    class Cfg:
-        api_base = "http://test"
-        api_key = "k"
-        model_name = "m"
-        max_tokens = 100
-        temperature = 0.1
-        use_thinking = False
-        api_max_retries = 1
-        api_retry_base = 0.01
-        parse_max_retries = 2
-
     responses = ["bad", "bad", "<reply>ok</reply>"]
     call_count = {"n": 0}
 
@@ -77,7 +84,7 @@ def test_call_and_parse_resampling():
 
     with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
         result, _ = call_and_parse(
-            Cfg(),
+            RetryCfg(),
             [{"role": "user", "content": "hi"}],
             _parse_mock_user_response,
             step_name="test",
@@ -87,17 +94,6 @@ def test_call_and_parse_resampling():
 
 
 def test_call_and_parse_feedback_on_retry():
-    class Cfg:
-        api_base = "http://test"
-        api_key = "k"
-        model_name = "m"
-        max_tokens = 100
-        temperature = 0.1
-        use_thinking = False
-        api_max_retries = 1
-        api_retry_base = 0.01
-        parse_max_retries = 2
-
     responses = ["bad", "bad", "<reply>ok</reply>"]
     call_count = {"n": 0}
     captured_messages = []
@@ -112,7 +108,7 @@ def test_call_and_parse_feedback_on_retry():
 
     with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
         result, _ = call_and_parse(
-            Cfg(),
+            RetryCfg(),
             [{"role": "user", "content": "hi"}],
             _parse_mock_user_response,
             step_name="test",
@@ -122,9 +118,35 @@ def test_call_and_parse_feedback_on_retry():
         assert len(captured_messages[1]) == 3
         assert captured_messages[1][1]["role"] == "assistant"
         assert captured_messages[1][1]["content"] == "bad"
-        assert "上一次输出无法解析" in captured_messages[1][2]["content"]
+        assert "Previous output could not be parsed" in captured_messages[1][2]["content"]
         assert len(captured_messages[2]) == 5
-        assert "上一次输出无法解析" in captured_messages[2][4]["content"]
+        assert "Previous output could not be parsed" in captured_messages[2][4]["content"]
+
+
+def test_call_and_parse_returns_last_messages_after_parse_exhaustion():
+    class Cfg(RetryCfg):
+        parse_max_retries = 1
+
+    responses = ["bad-one", "bad-two"]
+    call_count = {"n": 0}
+
+    def fake_call_llm_messages(**kwargs):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        msgs = list(kwargs["messages"])
+        msgs.append({"role": "assistant", "content": responses[idx]})
+        return msgs
+
+    with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
+        result, messages = call_and_parse(
+            Cfg(),
+            [{"role": "user", "content": "hi"}],
+            _parse_mock_user_response,
+            step_name="test",
+        )
+        assert result is None
+        assert messages[-1] == {"role": "assistant", "content": "bad-two"}
+
 
 def test_messages_for_chat_completion_converts_pseudo_tool_role():
     messages = [
@@ -143,23 +165,12 @@ def test_messages_for_chat_completion_converts_pseudo_tool_role():
 
 
 def test_call_and_parse_reraises_api_errors():
-    class Cfg:
-        api_base = "http://test"
-        api_key = "k"
-        model_name = "m"
-        max_tokens = 100
-        temperature = 0.1
-        use_thinking = False
-        api_max_retries = 1
-        api_retry_base = 0.01
-        parse_max_retries = 2
-
     api_error = RuntimeError("upstream unavailable")
 
     with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=api_error):
         try:
             call_and_parse(
-                Cfg(),
+                RetryCfg(),
                 [{"role": "user", "content": "hi"}],
                 _parse_mock_user_response,
                 step_name="test",
@@ -169,26 +180,102 @@ def test_call_and_parse_reraises_api_errors():
             assert exc is api_error
 
 
-def test_parse_mock_tool_response_lenient():
+def test_parse_mock_tool_response_json_contract():
     response, new_bg = _parse_mock_tool_response(
-        "<TOOL_RESPONSE>hello</TOOL_RESPONSE><new_bg_introduced>NO</new_bg_introduced>"
+        '{"tool_response":"hello","new_bg_introduced":"NO"}'
     )
     assert response == "hello"
     assert new_bg is False
 
-    response, new_bg = _parse_mock_tool_response("<tool_response attr='x'>open only")
+    response, new_bg = _parse_mock_tool_response(
+        '```json\n{"tool_response":"open only","new_bg_introduced":"YES"}\n```'
+    )
     assert response == "open only"
     assert new_bg is True
 
-    response, new_bg = _parse_mock_tool_response("plain tool output without tags")
-    assert response == "plain tool output without tags"
-    assert new_bg is True
+    for bad_response in ("plain tool output without json", '{"new_bg_introduced":"NO"}', '["bad"]'):
+        try:
+            _parse_mock_tool_response(bad_response)
+            raise AssertionError("expected ParseError")
+        except ParseError:
+            pass
 
-    try:
-        _parse_mock_tool_response("<tools>not a tool response</tools>")
-        raise AssertionError("expected ParseError")
-    except ParseError:
-        pass
+
+def test_mock_tool_response_resamples_after_invalid_json():
+    responses = [
+        "not json",
+        '{"new_bg_introduced":"NO"}',
+        '{"tool_response":"ok","new_bg_introduced":"YES"}',
+    ]
+    call_count = {"n": 0}
+
+    def fake_call_llm_messages(**kwargs):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        msgs = list(kwargs["messages"])
+        msgs.append({"role": "assistant", "content": responses[idx]})
+        return msgs
+
+    with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
+        result = mock_tool_response(RetryCfg(), "{}", [], [])
+        assert result == ("ok", True)
+        assert call_count["n"] == 3
+
+
+def test_openai_client_internal_retries_are_disabled():
+    fake_response = MagicMock()
+    fake_response.choices = [MagicMock(message=MagicMock(content="ok"))]
+
+    with patch("tracesynth.functions.call_llms.OpenAI") as openai_cls:
+        openai_cls.return_value.chat.completions.create.return_value = fake_response
+        result = create_chat_completion_with_retry(
+            api_base="http://test",
+            api_key="k",
+            model_name="m",
+            messages=[],
+            max_tokens=10,
+            temperature=0.1,
+            api_max_retries=1,
+        )
+        assert result == "ok"
+        openai_cls.assert_called_once_with(api_key="k", base_url="http://test", max_retries=0)
+
+
+def test_invalid_tool_call_feedback_is_valid_tool_response():
+    state = {
+        "breaked": False,
+        "seed_info": {"label": ""},
+        "checked_tools": [{"name": "known", "parameters": {}}],
+        "fuzzy_task": "task",
+        "restrict": "",
+        "solve_history": [{"role": "user", "content": "hi"}],
+        "tool_call_history": [],
+        "tool_call_retry_count": 0,
+    }
+    config = {
+        "configurable": {
+            "retry": {"tool_call_max_retries": 3},
+            "step_models": {
+                "SolveAgent": {
+                    "name": "m",
+                    "api_base": "http://test",
+                    "api_key_env": "EMPTY",
+                }
+            },
+        }
+    }
+
+    with patch(
+        "tracesynth.graph.graph_virtual_tools.solve_task_by_tools",
+        return_value=("thinking <tool_call>{}</tool_call>", "{}"),
+    ):
+        update = solve_task_node(state, config)
+
+    feedback = update["solve_history"][-1]["content"]
+    assert update["task_finished"] == "Retry solve"
+    assert update["tool_call_retry_count"] == 1
+    assert feedback.startswith("<tool_response>")
+    assert feedback.endswith("</tool_response>")
 
 
 def test_model_configuration_defaults():
@@ -211,9 +298,13 @@ if __name__ == "__main__":
     test_parse_fuzzy_task()
     test_call_and_parse_resampling()
     test_call_and_parse_feedback_on_retry()
+    test_call_and_parse_returns_last_messages_after_parse_exhaustion()
     test_messages_for_chat_completion_converts_pseudo_tool_role()
     test_call_and_parse_reraises_api_errors()
-    test_parse_mock_tool_response_lenient()
+    test_parse_mock_tool_response_json_contract()
+    test_mock_tool_response_resamples_after_invalid_json()
+    test_openai_client_internal_retries_are_disabled()
+    test_invalid_tool_call_feedback_is_valid_tool_response()
     test_model_configuration_defaults()
     test_graph_helpers()
     print("All verification tests passed")

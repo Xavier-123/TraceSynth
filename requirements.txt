@@ -5,3 +5,4 @@ langgraph
 langchain-core
 pydantic
 datasets
+pytest

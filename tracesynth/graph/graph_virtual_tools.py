@@ -344,7 +344,10 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
                     )
                 solve_history.append({
                     "role": "tool",
-                    "content": f"<tool_response>你的 tool_call 非法: {error}，请修正后重新输出</tool_response>",
+                    "content": (
+                        f"<tool_response>Your tool_call is invalid: {error}. "
+                        "Please fix it and output a valid tool_call.</tool_response>"
+                    ),
                 })
                 return {
                     "current_tool_call": None,

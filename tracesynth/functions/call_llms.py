@@ -64,7 +64,7 @@ def create_chat_completion_with_retry(
     api_max_retries: int = 3,
     api_retry_base: float = 1.0,
 ) -> str:
-    client = OpenAI(api_key=api_key, base_url=api_base)
+    client = OpenAI(api_key=api_key, base_url=api_base, max_retries=0)
     last_exc: Optional[Exception] = None
 
     for attempt in range(api_max_retries):
@@ -187,6 +187,7 @@ def call_and_parse(
     last_error: Optional[str] = None
     working_messages = list(messages)
     last_content: Optional[str] = None
+    last_result_messages: Optional[List[Dict[str, str]]] = None
 
     for attempt in range(total_attempts):
         try:
@@ -201,8 +202,9 @@ def call_and_parse(
                 api_max_retries=getattr(cfg, "api_max_retries", 3),
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
             )
+            last_result_messages = result_messages
         except Exception as exc:
-            logger.exception(f"%s API call failed; aborting parse loop {str(exc)}", step_name)
+            logger.exception("%s API call failed; aborting parse loop: %s", step_name, str(exc))
             raise
 
         try:
@@ -231,8 +233,8 @@ def call_and_parse(
                         {
                             "role": "user",
                             "content": (
-                                f"上一次输出无法解析：{last_error}。"
-                                "请严格按要求的标签格式重新输出。"
+                                f"Previous output could not be parsed: {last_error}. "
+                                "Please strictly follow the required output format and try again."
                             ),
                         },
                     )
@@ -244,4 +246,4 @@ def call_and_parse(
                     last_error,
                 )
 
-    return None, messages
+    return None, last_result_messages or messages
