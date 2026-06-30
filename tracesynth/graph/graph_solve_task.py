@@ -142,7 +142,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
 
     tool_response, new_bg_introduced = mock_tool_response(cfg, tool_call, tools_description, tool_call_history)
     tool_response_message = {
-        "role": "user", "content": f"<tool_response>{tool_response}</tool_response>"
+        "role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"
     }
     solve_history.append(tool_response_message)
     if new_bg_introduced:

@@ -21,6 +21,19 @@ class ParseError(Exception):
     """Raised when LLM output cannot be parsed or validated."""
 
 
+def messages_for_chat_completion(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Convert TraceSynth pseudo-tool messages for chat-completion compatibility."""
+    converted_messages: List[Dict[str, str]] = []
+    for message in messages:
+        if message.get("role") == "tool":
+            converted = dict(message)
+            converted["role"] = "user"
+            converted_messages.append(converted)
+        else:
+            converted_messages.append(message)
+    return converted_messages
+
+
 def is_retryable_api_error(exc: Exception) -> bool:
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)):
         return True
@@ -119,7 +132,7 @@ def call_llm_messages(
         api_base=api_base,
         api_key=api_key,
         model_name=model_name,
-        messages=messages,
+        messages=messages_for_chat_completion(messages),
         max_tokens=max_tokens,
         temperature=temperature,
         use_thinking=use_thinking,

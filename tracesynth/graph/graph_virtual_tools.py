@@ -343,11 +343,8 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
                         **{"solve_history": solve_history},
                     )
                 solve_history.append({
-                    "role": "user",
-                    "content": (
-                        f"<tool_response>你的 tool_call 非法: {error}，"
-                        "请修正后重新输出</tool_response>"
-                    ),
+                    "role": "tool",
+                    "content": f"<tool_response>你的 tool_call 非法: {error}，请修正后重新输出</tool_response>",
                 })
                 return {
                     "current_tool_call": None,
@@ -398,9 +395,8 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     if tool_response is None:
         return build_failure("MockToolAgent returned no tool response", **{"solve_history": solve_history})
 
-    tool_response_message = {
-        "role": "user", "content": f"<tool_response>{tool_response}</tool_response>"
-    }
+    tool_response_message = {"role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"}
+
     solve_history.append(tool_response_message)
     if new_bg_introduced:
         tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")

@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 from openai import APIError, RateLimitError
 
 from tracesynth.configuration import ModelConfiguration
-from tracesynth.functions.call_llms import ParseError, call_and_parse, is_retryable_api_error
+from tracesynth.functions.call_llms import (
+    ParseError,
+    call_and_parse,
+    is_retryable_api_error,
+    messages_for_chat_completion,
+)
 from tracesynth.functions.fuzzy_task import _parse_fuzzy_task_response
 from tracesynth.functions.mock_tools import _parse_mock_tool_response
 from tracesynth.functions.mock_user import _parse_mock_user_response
@@ -121,6 +126,22 @@ def test_call_and_parse_feedback_on_retry():
         assert len(captured_messages[2]) == 5
         assert "上一次输出无法解析" in captured_messages[2][4]["content"]
 
+def test_messages_for_chat_completion_converts_pseudo_tool_role():
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "tool", "content": "<tool_response>answer</tool_response>"},
+    ]
+
+    converted = messages_for_chat_completion(messages)
+
+    assert messages[1]["role"] == "tool"
+    assert converted[0] == messages[0]
+    assert converted[1] == {
+        "role": "user",
+        "content": "<tool_response>answer</tool_response>",
+    }
+
+
 def test_call_and_parse_reraises_api_errors():
     class Cfg:
         api_base = "http://test"
@@ -190,6 +211,7 @@ if __name__ == "__main__":
     test_parse_fuzzy_task()
     test_call_and_parse_resampling()
     test_call_and_parse_feedback_on_retry()
+    test_messages_for_chat_completion_converts_pseudo_tool_role()
     test_call_and_parse_reraises_api_errors()
     test_parse_mock_tool_response_lenient()
     test_model_configuration_defaults()
