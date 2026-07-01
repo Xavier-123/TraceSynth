@@ -6,3 +6,4 @@ langchain-core
 pydantic
 datasets
 pytest
+tqdm

@@ -244,7 +244,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
             "solve_history": [],
             "tool_call_history": tool_call_history
         }
-        run_config["recursion_limit"] = 100
+        run_config["recursion_limit"] = 50
         final_state = graph.invoke(initial_state, config=run_config)
 
         solution_filename = f"{solve_path}/solution{next_number}.json"

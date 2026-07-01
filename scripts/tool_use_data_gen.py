@@ -1,5 +1,6 @@
 import logging
 import concurrent.futures
+from tqdm import tqdm
 import argparse
 import sys
 from pathlib import Path
@@ -171,21 +172,32 @@ def main():
 
             completed_tasks = 0
             failed_tasks = 0
+            total_tasks = len(tasks_to_process)
 
-            for future in concurrent.futures.as_completed(future_to_task):
-                seed_info = future_to_task[future]
-                try:
-                    success = future.result()
-                    if success:
-                        completed_tasks += 1
-                    else:
+            with tqdm(
+                total=total_tasks,
+                desc="Synthesizing",
+                unit="task",
+                dynamic_ncols=True,
+                colour="green",
+            ) as pbar:
+                for future in concurrent.futures.as_completed(future_to_task):
+                    seed_info = future_to_task[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            completed_tasks += 1
+                        else:
+                            failed_tasks += 1
+                    except SeedRecordError as e:
+                        logger.error(f"Task {seed_info.get('id', 'unknown')} invalid seed: {e}")
                         failed_tasks += 1
-                except SeedRecordError as e:
-                    logger.error(f"Task {seed_info.get('id', 'unknown')} invalid seed: {e}")
-                    failed_tasks += 1
-                except Exception as e:
-                    logger.error(f"Task {seed_info.get('id', 'unknown')} generated an exception: {e}")
-                    failed_tasks += 1
+                    except Exception as e:
+                        logger.error(f"Task {seed_info.get('id', 'unknown')} generated an exception: {e}")
+                        failed_tasks += 1
+                    finally:
+                        pbar.update(1)
+                        pbar.set_postfix(success=completed_tasks, failed=failed_tasks)
 
             logger.info(f"Processing completed: {completed_tasks} successful, {failed_tasks} failed")
 

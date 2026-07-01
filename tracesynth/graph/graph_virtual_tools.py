@@ -512,7 +512,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         "tool_call_history": [],
         "tool_call_retry_count": 0,
     }
-    run_config["recursion_limit"] = 100
+    run_config["recursion_limit"] = 50
     final_state = graph.invoke(initial_state, config=run_config)
 
     if not is_successful_final_state(final_state):

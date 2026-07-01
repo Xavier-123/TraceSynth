@@ -6,36 +6,42 @@ step_models:
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
   FuzzyTaskAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
   ToolCheckAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
   SolveAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
   MockToolAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
   MockUserAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
+    use_thinking: false
 
 processing:
   max_workers: 1
@@ -52,6 +58,18 @@ logging:
   task_file_path: "../output/virtual_tool_use.jsonl"
   failed_task_file_path: "../output/virtual_tool_use.failed.jsonl"
   solve_path: "../output/solve_tool_use/"
+
+evaluation:
+  skip_label_match: false
+  use_label_as_answer: true
+
+input:
+  question_fields: ["question", "query"]
+  label_fields: ["label", "answer", "gold"]
+  context_field: "context"
+  id_field: "id"
+  dataset_split: "test"
+  legacy_persona_mode: false
 
 paths:
   data_file: "../configs/persona_5K.jsonl"
