@@ -278,6 +278,42 @@ def test_invalid_tool_call_feedback_is_valid_tool_response():
     assert feedback.endswith("</tool_response>")
 
 
+def test_solver_turn_limit_returns_failure_without_extra_model_call():
+    state = {
+        "breaked": False,
+        "seed_info": {"label": ""},
+        "checked_tools": [{"name": "known", "parameters": {}}],
+        "fuzzy_task": "task",
+        "restrict": "",
+        "solve_history": [{"role": "assistant", "content": "still searching"}],
+        "tool_call_history": ["previous call"],
+        "tool_call_retry_count": 0,
+        "solver_turn_count": 1,
+    }
+    config = {
+        "configurable": {
+            "processing": {"max_solver_turns": 1},
+            "step_models": {
+                "SolveAgent": {
+                    "name": "m",
+                    "api_base": "http://test",
+                    "api_key_env": "EMPTY",
+                }
+            },
+        }
+    }
+
+    with patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools") as mock_solve:
+        update = solve_task_node(state, config)
+
+    mock_solve.assert_not_called()
+    assert update["breaked"] is True
+    assert update["task_finished"] == "Terminated"
+    assert "max_solver_turns=1" in update["failure_reason"]
+    assert update["solve_history"] == state["solve_history"]
+    assert update["tool_call_history"] == state["tool_call_history"]
+
+
 def test_model_configuration_defaults():
     cfg = ModelConfiguration(model_name="m")
     assert cfg.api_max_retries == 3
@@ -305,6 +341,7 @@ if __name__ == "__main__":
     test_mock_tool_response_resamples_after_invalid_json()
     test_openai_client_internal_retries_are_disabled()
     test_invalid_tool_call_feedback_is_valid_tool_response()
+    test_solver_turn_limit_returns_failure_without_extra_model_call()
     test_model_configuration_defaults()
     test_graph_helpers()
     print("All verification tests passed")

@@ -9,7 +9,7 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
-from tracesynth.configuration import ModelConfiguration, SynthesisComplexity
+from tracesynth.configuration import ModelConfiguration, SynthesisComplexity, parse_range
 from tracesynth.io import (
     validate_seed_info,
     extract_predicted_answer,
@@ -47,15 +47,14 @@ class AgentState(TypedDict):
     task_finished: str
     failure_reason: str
     tool_call_retry_count: int
+    solver_turn_count: int
 
 
 def build_failure(reason: str, **extra: Any) -> Dict[str, Any]:
-    payload = {
-        "breaked": True,
-        "task_finished": "Terminated",
-        "failure_reason": reason,
-    }
-    payload.update(extra)
+    payload = dict(extra)
+    payload["breaked"] = True
+    payload["task_finished"] = "Terminated"
+    payload["failure_reason"] = reason
     return payload
 
 
@@ -152,6 +151,52 @@ def get_tool_call_max_retries(config: RunnableConfig) -> int:
     return int(retry_cfg.get("tool_call_max_retries", 3))
 
 
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def get_solver_max_turns(config: RunnableConfig) -> int:
+    configurable = config.get("configurable", {}) if config else {}
+
+    for value in (
+        configurable.get("max_solver_turns"),
+        (configurable.get("processing") or {}).get("max_solver_turns"),
+        (configurable.get("solver") or {}).get("max_turns"),
+        (configurable.get("retry") or {}).get("max_solver_turns"),
+    ):
+        if value is not None:
+            return _coerce_positive_int(value, 18)
+
+    _, max_iterations = parse_range(get_synthesis_complexity(config).max_iterations)
+    return max(12, 6 * (max_iterations + 1) + 6)
+
+
+def get_graph_recursion_limit(config: RunnableConfig, max_solver_turns: int) -> int:
+    configurable = config.get("configurable", {}) if config else {}
+    configured = (
+        configurable.get("recursion_limit")
+        or (configurable.get("processing") or {}).get("graph_recursion_limit")
+        or (configurable.get("processing") or {}).get("recursion_limit")
+    )
+    estimated = max(60, 3 + (2 * max_solver_turns) + 10)
+    return max(_coerce_positive_int(configured, estimated), estimated)
+
+
+def is_graph_recursion_error(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        exc.__class__.__name__ == "GraphRecursionError"
+        or (
+            "Recursion limit" in text
+            and "recursion_limit" in text
+        )
+    )
+
+
 def use_label_as_answer(config: RunnableConfig) -> bool:
     eval_cfg = config.get("configurable", {}).get("evaluation") or {}
     return bool(eval_cfg.get("use_label_as_answer", True))
@@ -166,7 +211,7 @@ def is_supervised_seed(seed_info: Dict[str, Any]) -> bool:
 
 
 def toolset_gen_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------ToolSetGenAgent------------------")
+    logger.debug("------------------ToolSetGenAgent------------------")
 
     # Create step-specific configuration
     step_config = create_step_config(config, "ToolSetGenAgent")
@@ -200,7 +245,7 @@ def toolset_gen_node(state: AgentState, config: RunnableConfig):
 
 
 def fuzzy_task_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------FuzzyTaskAgent------------------")
+    logger.debug("------------------FuzzyTaskAgent------------------")
     if state["breaked"]:
         return {}
 
@@ -258,7 +303,7 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
 
 
 def check_tools_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------ToolCheckAgent------------------")
+    logger.debug("------------------ToolCheckAgent------------------")
 
     if state["breaked"]:
         return {}
@@ -282,13 +327,26 @@ def check_tools_node(state: AgentState, config: RunnableConfig):
 
 
 def solve_task_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------SolveTaskAgent------------------")
+    logger.debug("------------------SolveTaskAgent------------------")
 
     if state["breaked"]:
         return {
             "current_tool_call": None,
             "task_finished": "Terminated"
         }
+
+    solver_turn_count = int(state.get("solver_turn_count", 0) or 0) + 1
+    max_solver_turns = get_solver_max_turns(config)
+    if solver_turn_count > max_solver_turns:
+        return build_failure(
+            f"SolveAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
+            **{
+                "solve_history": state.get("solve_history", []),
+                "tool_call_history": state.get("tool_call_history", []),
+                "solver_turn_count": solver_turn_count,
+                "max_solver_turns": max_solver_turns,
+            },
+        )
 
     # Create step-specific configuration
     step_config = create_step_config(config, "SolveAgent")
@@ -322,7 +380,15 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
 
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
     if not is_non_empty_text(one_step_think_and_tool_call):
-        return build_failure("SolveAgent returned empty content", **{"solve_history": solve_history})
+        return build_failure(
+            "SolveAgent returned empty content",
+            **{
+                "solve_history": solve_history,
+                "tool_call_history": state.get("tool_call_history", []),
+                "solver_turn_count": solver_turn_count,
+                "max_solver_turns": max_solver_turns,
+            },
+        )
 
     one_step_think_and_tool_call_message = {
         "role": "assistant", "content": one_step_think_and_tool_call
@@ -340,7 +406,12 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
                 if retry_count >= max_retries:
                     return build_failure(
                         error or "Invalid tool_call",
-                        **{"solve_history": solve_history},
+                        **{
+                            "solve_history": solve_history,
+                            "tool_call_history": state.get("tool_call_history", []),
+                            "solver_turn_count": solver_turn_count,
+                            "max_solver_turns": max_solver_turns,
+                        },
                     )
                 solve_history.append({
                     "role": "tool",
@@ -354,6 +425,7 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
                     "solve_history": solve_history,
                     "task_finished": "Retry solve",
                     "tool_call_retry_count": retry_count + 1,
+                    "solver_turn_count": solver_turn_count,
                 }
             task_finished = "Tool call"
     else:
@@ -369,12 +441,13 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
     return {
         "current_tool_call": tool_call_info,
         "solve_history": solve_history,
-        "task_finished": task_finished
+        "task_finished": task_finished,
+        "solver_turn_count": solver_turn_count,
     }
 
 
 def mock_tools_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------MockToolsAgent------------------")
+    logger.debug("------------------MockToolsAgent------------------")
     if state["breaked"]:
         return {}
 
@@ -396,7 +469,14 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
         context=state["seed_info"].get("context", "") or "",
     )
     if tool_response is None:
-        return build_failure("MockToolAgent returned no tool response", **{"solve_history": solve_history})
+        return build_failure(
+            "MockToolAgent returned no tool response",
+            **{
+                "solve_history": solve_history,
+                "tool_call_history": tool_call_history,
+                "current_tool_call": tool_call,
+            },
+        )
 
     tool_response_message = {"role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"}
 
@@ -410,7 +490,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     }
 
 def mock_user_node(state: AgentState, config: RunnableConfig):
-    logger.info("------------------MockUserAgent------------------")
+    logger.debug("------------------MockUserAgent------------------")
 
     if state["breaked"]:
         return {}
@@ -425,7 +505,13 @@ def mock_user_node(state: AgentState, config: RunnableConfig):
 
     user_response = mock_user_response(cfg, fuzzy_task, task_background, restrict, solve_history)
     if user_response is None:
-        return build_failure("MockUserAgent returned no user response", **{"solve_history": solve_history})
+        return build_failure(
+            "MockUserAgent returned no user response",
+            **{
+                "solve_history": solve_history,
+                "tool_call_history": state.get("tool_call_history", []),
+            },
+        )
 
     solve_history.append({"role": "user", "content": user_response})
 
@@ -478,6 +564,23 @@ def save_architecture_diagram(output_path: str) -> None:
         f.write(img_bytes)
 
 # --- 运行入口 ---
+def save_failure_artifacts(solve_path: str, final_state: Dict[str, Any]) -> None:
+    """Persist failed state and any partial reasoning trajectory."""
+    os.makedirs(solve_path, exist_ok=True)
+    with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
+        f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
+
+    solve_history = final_state.get("solve_history")
+    if isinstance(solve_history, list):
+        with open(os.path.join(solve_path, "failed_solution.json"), 'w', encoding='utf-8') as f:
+            f.write(json.dumps(solve_history, ensure_ascii=False, indent=4) + '\n')
+
+    tool_call_history = final_state.get("tool_call_history")
+    if isinstance(tool_call_history, list):
+        with open(os.path.join(solve_path, "tool_call_history.json"), 'w', encoding='utf-8') as f:
+            f.write(json.dumps(tool_call_history, ensure_ascii=False, indent=4) + '\n')
+
+
 def run_agent(seed_info: dict, run_config: dict = None):
     run_config = run_config or {}
     seed_info = validate_seed_info(seed_info)
@@ -511,23 +614,42 @@ def run_agent(seed_info: dict, run_config: dict = None):
         "solve_history": [],
         "tool_call_history": [],
         "tool_call_retry_count": 0,
+        "solver_turn_count": 0,
     }
-    run_config["recursion_limit"] = 50
-    final_state = graph.invoke(initial_state, config=run_config)
+    max_solver_turns = get_solver_max_turns(run_config)
+    run_config["recursion_limit"] = get_graph_recursion_limit(run_config, max_solver_turns)
+    try:
+        final_state = graph.invoke(initial_state, config=run_config)
+    except Exception as exc:
+        if not is_graph_recursion_error(exc):
+            raise
+        final_state = build_failure(
+            f"LangGraph recursion limit reached before stop condition: {exc}",
+            **{
+                **initial_state,
+                "solver_turn_count": initial_state.get("solver_turn_count", 0),
+                "max_solver_turns": max_solver_turns,
+                "recursion_limit": run_config["recursion_limit"],
+            },
+        )
 
     if not is_successful_final_state(final_state):
         failure_reason = final_state.get("failure_reason") or "generation did not produce a valid final answer"
+        failure_type = (
+            "graph_recursion_limit"
+            if "recursion limit" in failure_reason.lower()
+            else "generation_failed"
+        )
         with log_file_lock:
             write_failure_record(
                 failed_task_path,
                 seed_info=seed_info,
                 final_state=final_state,
                 stage="graph",
-                failure_type="generation_failed",
+                failure_type=failure_type,
                 failure_reason=failure_reason,
             )
-            with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
-                f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
+            save_failure_artifacts(solve_path, final_state)
         return final_state
 
     predicted_answer = extract_predicted_answer(final_state.get("solve_history"))
@@ -552,9 +674,9 @@ def run_agent(seed_info: dict, run_config: dict = None):
                 failure_reason=failure_reason,
                 label_check=label_check,
             )
-            with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
-                f.write(json.dumps({**final_state, **label_check}, ensure_ascii=False, indent=4) + '\n')
-        return {**final_state, **label_check, "breaked": True, "failure_reason": failure_reason}
+            failed_state = {**final_state, **label_check, "breaked": True, "failure_reason": failure_reason}
+            save_failure_artifacts(solve_path, failed_state)
+        return failed_state
 
     save_data = {
         "id": seed_info["id"],

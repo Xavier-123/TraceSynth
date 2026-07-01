@@ -68,6 +68,33 @@ def test_run_agent_graph_failure_writes_structured_failure_and_state(tmp_path):
     assert failed_state_path.exists()
 
 
+def test_run_agent_graph_failure_writes_partial_trajectory(tmp_path):
+    final_state = {
+        "seed_info": _seed(),
+        "breaked": True,
+        "task_finished": "Terminated",
+        "failure_reason": "SolveAgent exceeded max_solver_turns=1 without producing <answer>",
+        "fuzzy_task": "q",
+        "checked_tools": [{"name": "Search", "parameters": {}}],
+        "solve_history": [{"role": "assistant", "content": "partial reasoning"}],
+        "tool_call_history": ["Query: Search, Response: partial"],
+    }
+
+    with patch("tracesynth.graph.graph_virtual_tools.graph.invoke", return_value=final_state):
+        run_agent(_seed(), _config(tmp_path))
+
+    artifact_dir = tmp_path / "solve_tool_use" / "rag-fail"
+    failed_solution_path = artifact_dir / "failed_solution.json"
+    tool_history_path = artifact_dir / "tool_call_history.json"
+
+    assert failed_solution_path.exists()
+    assert tool_history_path.exists()
+    with open(failed_solution_path, "r", encoding="utf-8") as handle:
+        assert json.load(handle) == final_state["solve_history"]
+    with open(tool_history_path, "r", encoding="utf-8") as handle:
+        assert json.load(handle) == final_state["tool_call_history"]
+
+
 def test_run_agent_missing_answer_label_check_is_failure(tmp_path):
     final_state = {
         "seed_info": _seed(),

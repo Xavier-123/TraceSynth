@@ -89,7 +89,7 @@ def create_chat_completion_with_retry(
                     },
                 )
             else:
-                logger.warning("Using default API base!!!")
+                logger.debug("Using default API base!!!")
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,

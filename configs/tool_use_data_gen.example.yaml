@@ -47,6 +47,8 @@ processing:
   max_workers: 1
   max_tasks: 2
   retry_failed_tasks: true
+  max_solver_turns: 18
+  graph_recursion_limit: 60
 
 retry:
   api_max_retries: 3
