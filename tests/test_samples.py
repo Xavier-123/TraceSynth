@@ -73,7 +73,7 @@ def test_validate_seed_info_builds_background():
 
 
 def test_load_seed_records_from_fixture():
-    fixture = PROJECT_ROOT / "configs" / "seed_qa_sample.jsonl"
+    fixture = PROJECT_ROOT / "data" / "seed_qa_sample.jsonl"
     records = load_seed_records(fixture, input_config=InputConfig())
     assert len(records) == 3
     assert all(record.label for record in records)

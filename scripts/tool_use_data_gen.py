@@ -1,5 +1,4 @@
 import logging
-import yaml
 import concurrent.futures
 import argparse
 import sys
@@ -10,12 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tracesynth.graph.graph_virtual_tools import is_successful_final_state, run_agent
 from tracesynth.io import (
     InputConfig,
     SeedRecordError,
     load_seed_records,
+    read_failed_ids,
     read_processed_ids,
+    write_failure_record,
 )
 
 
@@ -66,6 +66,32 @@ def apply_complexity_cli_overrides(config: Dict[str, Any], args: argparse.Namesp
     return config
 
 
+def get_failed_task_path(run_config: Dict[str, Any]) -> str:
+    logging_cfg = run_config.get("logging") or {}
+    task_file_path = logging_cfg.get("task_file_path", "virtual_tool_use.jsonl")
+    return logging_cfg.get("failed_task_file_path", f"{task_file_path}.failed")
+
+
+def write_exception_failure(seed_info: Dict[str, Any], run_config: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+    return write_failure_record(
+        get_failed_task_path(run_config),
+        seed_info=seed_info,
+        final_state={},
+        stage="entrypoint",
+        failure_type="exception",
+        failure_reason=str(exc),
+        extra={"exception_class": exc.__class__.__name__},
+    )
+
+
+def get_ids_to_skip(run_config: Dict[str, Any]) -> set[str]:
+    processed_ids = read_processed_ids(run_config["logging"]["task_file_path"])
+    retry_failed_tasks = run_config.get("processing", {}).get("retry_failed_tasks", True)
+    if retry_failed_tasks:
+        return processed_ids
+    return processed_ids | read_failed_ids(get_failed_task_path(run_config))
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate synthetic tool-use tasks from supervised QA seeds')
     parser.add_argument('--config', type=str, default=str(PROJECT_ROOT / 'configs' / 'tool_use_data_gen.yaml'),
@@ -78,6 +104,8 @@ def main():
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
+    import yaml
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     config = normalize_config_paths(config, config_path)
@@ -95,16 +123,19 @@ def main():
 
     def process_single_task(seed_info: Dict[str, Any], run_config: Dict[str, Any]) -> bool:
         try:
+            from tracesynth.graph.graph_virtual_tools import is_successful_final_state, run_agent
+
             task_id = seed_info["id"]
             logger.info(f"Processing task: {task_id}")
             final_state = run_agent(seed_info=seed_info, run_config=run_config)
             return is_successful_final_state(final_state)
         except Exception as e:
             logger.error(f"Error processing task {seed_info.get('id', 'unknown')}: {e}")
+            write_exception_failure(seed_info, run_config, e)
             return False
 
     def run_tasks_from_file(run_config: Dict[str, Any]):
-        processed_ids = read_processed_ids(run_config["logging"]["task_file_path"])
+        processed_ids = get_ids_to_skip(run_config)
         source_path = run_config["paths"]["data_file"]
         max_tasks = run_config["processing"].get("max_tasks")
 

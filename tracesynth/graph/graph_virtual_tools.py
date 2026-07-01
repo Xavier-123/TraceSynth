@@ -1,6 +1,5 @@
 import os
 import json
-import yaml
 import glob
 import re
 import threading
@@ -15,6 +14,7 @@ from tracesynth.io import (
     validate_seed_info,
     extract_predicted_answer,
     check_label_match,
+    write_failure_record,
 )
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
@@ -516,18 +516,16 @@ def run_agent(seed_info: dict, run_config: dict = None):
     final_state = graph.invoke(initial_state, config=run_config)
 
     if not is_successful_final_state(final_state):
-        failure_data = {
-            "id": seed_info["id"],
-            "question": seed_info.get("question"),
-            "label": seed_info.get("label"),
-            "context_present": bool(seed_info.get("context")),
-            "failure_reason": final_state.get("failure_reason", "generation did not produce a valid final answer"),
-            "fuzzy_task": final_state.get("fuzzy_task"),
-            "checked_tools": final_state.get("checked_tools"),
-        }
+        failure_reason = final_state.get("failure_reason") or "generation did not produce a valid final answer"
         with log_file_lock:
-            with open(failed_task_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(failure_data, ensure_ascii=False) + '\n')
+            write_failure_record(
+                failed_task_path,
+                seed_info=seed_info,
+                final_state=final_state,
+                stage="graph",
+                failure_type="generation_failed",
+                failure_reason=failure_reason,
+            )
             with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
                 f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
         return final_state
@@ -538,23 +536,25 @@ def run_agent(seed_info: dict, run_config: dict = None):
         seed_info.get("label", ""),
         skip=skip_label_match,
     )
-    if label_check["label_match_status"] == "mismatch":
-        failure_data = {
-            "id": seed_info["id"],
-            "question": seed_info.get("question"),
-            "label": seed_info.get("label"),
-            "context_present": bool(seed_info.get("context")),
-            "failure_reason": "predicted answer does not match label",
-            "fuzzy_task": final_state.get("fuzzy_task"),
-            "checked_tools": final_state.get("checked_tools"),
-            **label_check,
-        }
+    if label_check["label_match_status"] in {"mismatch", "missing_answer"}:
+        failure_reason = (
+            "predicted answer is missing"
+            if label_check["label_match_status"] == "missing_answer"
+            else "predicted answer does not match label"
+        )
         with log_file_lock:
-            with open(failed_task_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(failure_data, ensure_ascii=False) + '\n')
+            write_failure_record(
+                failed_task_path,
+                seed_info=seed_info,
+                final_state=final_state,
+                stage="label_check",
+                failure_type=label_check["label_match_status"],
+                failure_reason=failure_reason,
+                label_check=label_check,
+            )
             with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
                 f.write(json.dumps({**final_state, **label_check}, ensure_ascii=False, indent=4) + '\n')
-        return {**final_state, **label_check, "breaked": True, "failure_reason": failure_data["failure_reason"]}
+        return {**final_state, **label_check, "breaked": True, "failure_reason": failure_reason}
 
     save_data = {
         "id": seed_info["id"],
@@ -613,6 +613,8 @@ def run_agent(seed_info: dict, run_config: dict = None):
 
 
 if __name__ == "__main__":
+    import yaml
+
     with open("configs/tool_use_data_gen.yaml", 'r', encoding='utf-8') as f:
         agent_config = yaml.safe_load(f)
 
