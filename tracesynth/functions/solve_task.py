@@ -23,7 +23,7 @@ def solve_task_by_tools(cfg, solve_history):
         cfg,
         solve_history,
         _parse_solver_response,
-        step_name="SolveAgent",
+        step_name="FinalLLMResponse",
     )
     if parsed is None:
         return None, None

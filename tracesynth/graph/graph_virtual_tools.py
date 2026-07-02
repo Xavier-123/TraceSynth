@@ -645,7 +645,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
     if not is_non_empty_text(one_step_think_and_tool_call):
         return build_failure(
-            "SolveAgent returned empty final answer content",
+            "Final Response returned empty final answer content",
             **{
                 "solve_history": solve_history,
                 "tool_call_history": state.get("tool_call_history", []),
@@ -687,7 +687,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
                             "The completed plan did not provide enough evidence for the final answer."
                         ],
                         "issues": [
-                            "SolveAgent requested an additional tool call after executing all planned steps."
+                            "Final Response requested an additional tool call after executing all planned steps."
                         ],
                         "revision_suggestions": [
                             "Revise the plan to include the missing evidence-gathering step before final answering."
@@ -707,7 +707,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
                     "The completed plan did not provide enough evidence for the final answer."
                 ],
                 "issues": [
-                    "SolveAgent requested an additional tool call after executing all planned steps."
+                    "Final Response requested an additional tool call after executing all planned steps."
                 ],
                 "revision_suggestions": [
                     "Revise the plan to include the missing evidence-gathering step before final answering."
@@ -717,7 +717,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         }
 
     return build_failure(
-        "SolveAgent completed planned execution but did not produce <answer>",
+        "Final Response completed planned execution but did not produce <answer>",
         **{
             "solve_history": solve_history,
             "tool_call_history": state.get("tool_call_history", []),
