@@ -255,7 +255,7 @@ def create_step_config(
     """Create a new configuration for a specific step with its designated model"""
     # cfg = AgentConfiguration.from_runnable_config(base_config)
     step_models = base_config["configurable"]["step_models"]
-    fallback_step = "SolveAgent" if step_name in {"PlanTrajectoryAgent", "EvaluatePlanAgent"} else step_name
+    fallback_step = "Fallback" if step_name in {"PlanTrajectoryAgent", "EvaluatePlanAgent", "ExecutePlanAgent"} else step_name
     step_model_config = step_models.get(step_name) or step_models[fallback_step]
 
     # Create a new config with the specific model for this step
@@ -631,7 +631,7 @@ def _format_planned_tool_message(step: Dict[str, Any], tool_call: str) -> str:
 
 
 def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, solver_turn_count: int) -> Dict[str, Any]:
-    step_config = create_step_config(config, "SolveAgent")
+    step_config = create_step_config(config, "ExecutePlanAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
     solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
 

@@ -152,7 +152,7 @@ python scripts/tool_use_data_gen.py \
 
 ### step_models — 各步骤模型
 
-为 6 个 Agent 节点分别指定模型、API 地址、密钥环境变量、温度、max_tokens：
+为各 Agent 节点分别指定模型、API 地址、密钥环境变量、温度、max_tokens：
 
 ```yaml
 step_models:
@@ -162,8 +162,12 @@ step_models:
     api_key_env: "EXAMPLE_API_KEY"
     max_tokens: 10240
     temperature: 0.9
-  # FuzzyTaskAgent, ToolCheckAgent, SolveAgent, MockToolAgent, MockUserAgent ...
+  # FuzzyTaskAgent, ToolCheckAgent,
+  # PlanTrajectoryAgent, EvaluatePlanAgent, ExecutePlanAgent,
+  # SolveAgent, MockToolAgent, MockUserAgent ...
 ```
+
+`PlanTrajectoryAgent`、`EvaluatePlanAgent`、`ExecutePlanAgent` 分别对应规划、评估与计划执行后生成最终答案的 LLM 调用。若未在 yaml 中配置，将自动回退到 `SolveAgent` 的模型参数。
 
 ### synthesis — 合成复杂度（4 个参数）
 

@@ -21,7 +21,21 @@ step_models:
     max_tokens: 10240
     temperature: 0.9
     use_thinking: false
-  SolveAgent:
+  PlanTrajectoryAgent:
+    name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
+    max_tokens: 10240
+    temperature: 0.9
+    use_thinking: false
+  EvaluatePlanAgent:
+    name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
+    max_tokens: 10240
+    temperature: 0.9
+    use_thinking: false
+  ExecutePlanAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
@@ -36,6 +50,13 @@ step_models:
     temperature: 0.9
     use_thinking: false
   MockUserAgent:
+    name: "qwen3-235b-a22b-instruct-2507"
+    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
+    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
+    max_tokens: 10240
+    temperature: 0.9
+    use_thinking: false
+  FallbackModel:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
