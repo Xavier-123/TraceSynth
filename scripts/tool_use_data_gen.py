@@ -122,6 +122,13 @@ def main():
     logger = logging.getLogger(__name__)
     input_config = InputConfig.from_run_config(config)
 
+    try:
+        from tracesynth.graph.graph_virtual_tools import save_architecture_diagram
+
+        save_architecture_diagram(str(PROJECT_ROOT / "architecture.png"))
+    except Exception as exc:
+        logger.warning("Failed to save architecture diagram: %s", exc)
+
     def process_single_task(seed_info: Dict[str, Any], run_config: Dict[str, Any]) -> bool:
         try:
             from tracesynth.graph.graph_virtual_tools import is_successful_final_state, run_agent

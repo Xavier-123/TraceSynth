@@ -1,4 +1,4 @@
-"""Tests for injecting dataset label as final answer in solve_task_node."""
+"""Tests for injecting dataset label as final answer in plan execution."""
 
 import os
 from pathlib import Path
@@ -11,7 +11,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("TEST_KEY", "test-api-key")
 
-from tracesynth.graph.graph_virtual_tools import solve_task_node, use_label_as_answer
+from tracesynth.graph.graph_virtual_tools import (
+    _generate_final_answer_from_plan,
+    use_label_as_answer,
+)
 from tracesynth.io import extract_predicted_answer, check_label_match
 
 
@@ -33,8 +36,12 @@ def _base_state(label: str = "标准答案内容"):
         ],
         "fuzzy_task": "测试问题",
         "restrict": "无额外约束",
-        "solve_history": [],
+        "solve_history": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "task prompt"},
+        ],
         "tool_call_retry_count": 0,
+        "plan_revision_count": 1,
     }
 
 
@@ -65,13 +72,13 @@ def test_use_label_as_answer_default_true():
 
 
 @patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
-def test_solve_task_node_injects_label_on_termination(mock_solve):
+def test_generate_final_answer_injects_label_on_termination(mock_solve):
     mock_solve.return_value = (
         "推理过程...\n<answer>模型自造的错误答案</answer>",
         None,
     )
     state = _base_state(label="数据集标准答案")
-    result = solve_task_node(state, _config(use_label=True))
+    result = _generate_final_answer_from_plan(state, _config(use_label=True), solver_turn_count=1)
 
     assert result["task_finished"] == "Terminated"
     assert result["solve_history"][-1] == {
@@ -88,29 +95,29 @@ def test_solve_task_node_injects_label_on_termination(mock_solve):
 
 
 @patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
-def test_solve_task_node_keeps_model_answer_when_flag_disabled(mock_solve):
+def test_generate_final_answer_keeps_model_answer_when_flag_disabled(mock_solve):
     model_answer = "推理过程...\n<answer>模型答案</answer>"
     mock_solve.return_value = (model_answer, None)
     state = _base_state(label="数据集标准答案")
-    result = solve_task_node(state, _config(use_label=False))
+    result = _generate_final_answer_from_plan(state, _config(use_label=False), solver_turn_count=1)
 
     assert result["solve_history"][-1]["content"] == model_answer
     assert extract_predicted_answer(result["solve_history"]) == "模型答案"
 
 
 @patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
-def test_solve_task_node_falls_back_when_label_empty(mock_solve):
+def test_generate_final_answer_falls_back_when_label_empty(mock_solve):
     model_answer = "推理过程...\n<answer>模型答案</answer>"
     mock_solve.return_value = (model_answer, None)
     state = _base_state(label="")
-    result = solve_task_node(state, _config(use_label=True))
+    result = _generate_final_answer_from_plan(state, _config(use_label=True), solver_turn_count=1)
 
     assert result["solve_history"][-1]["content"] == model_answer
 
 
 if __name__ == "__main__":
     test_use_label_as_answer_default_true()
-    test_solve_task_node_injects_label_on_termination()
-    test_solve_task_node_keeps_model_answer_when_flag_disabled()
-    test_solve_task_node_falls_back_when_label_empty()
+    test_generate_final_answer_injects_label_on_termination()
+    test_generate_final_answer_keeps_model_answer_when_flag_disabled()
+    test_generate_final_answer_falls_back_when_label_empty()
     print("All label injection tests passed")

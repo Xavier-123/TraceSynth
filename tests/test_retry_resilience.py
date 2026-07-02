@@ -22,9 +22,10 @@ from tracesynth.functions.mock_tools import _parse_mock_tool_response, mock_tool
 from tracesynth.functions.mock_user import _parse_mock_user_response
 from tracesynth.functions.tool_check import _parse_checked_tools
 from tracesynth.graph.graph_virtual_tools import (
+    execute_plan_node,
     get_tool_call_max_retries,
-    should_call_tool,
-    solve_task_node,
+    should_continue_execution,
+    should_execute_or_replan,
     validate_tool_call,
 )
 
@@ -241,43 +242,6 @@ def test_openai_client_internal_retries_are_disabled():
         openai_cls.assert_called_once_with(api_key="k", base_url="http://test", max_retries=0)
 
 
-def test_invalid_tool_call_feedback_is_valid_tool_response():
-    state = {
-        "breaked": False,
-        "seed_info": {"label": ""},
-        "checked_tools": [{"name": "known", "parameters": {}}],
-        "fuzzy_task": "task",
-        "restrict": "",
-        "solve_history": [{"role": "user", "content": "hi"}],
-        "tool_call_history": [],
-        "tool_call_retry_count": 0,
-    }
-    config = {
-        "configurable": {
-            "retry": {"tool_call_max_retries": 3},
-            "step_models": {
-                "SolveAgent": {
-                    "name": "m",
-                    "api_base": "http://test",
-                    "api_key_env": "EMPTY",
-                }
-            },
-        }
-    }
-
-    with patch(
-        "tracesynth.graph.graph_virtual_tools.solve_task_by_tools",
-        return_value=("thinking <tool_call>{}</tool_call>", "{}"),
-    ):
-        update = solve_task_node(state, config)
-
-    feedback = update["solve_history"][-1]["content"]
-    assert update["task_finished"] == "Retry solve"
-    assert update["tool_call_retry_count"] == 1
-    assert feedback.startswith("<tool_response>")
-    assert feedback.endswith("</tool_response>")
-
-
 def test_solver_turn_limit_returns_failure_without_extra_model_call():
     state = {
         "breaked": False,
@@ -289,6 +253,8 @@ def test_solver_turn_limit_returns_failure_without_extra_model_call():
         "tool_call_history": ["previous call"],
         "tool_call_retry_count": 0,
         "solver_turn_count": 1,
+        "plan": [{"tool_name": "known", "arguments": {}}],
+        "current_plan_step": 0,
     }
     config = {
         "configurable": {
@@ -304,7 +270,7 @@ def test_solver_turn_limit_returns_failure_without_extra_model_call():
     }
 
     with patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools") as mock_solve:
-        update = solve_task_node(state, config)
+        update = execute_plan_node(state, config)
 
     mock_solve.assert_not_called()
     assert update["breaked"] is True
@@ -323,7 +289,8 @@ def test_model_configuration_defaults():
 
 def test_graph_helpers():
     assert get_tool_call_max_retries({"configurable": {"retry": {"tool_call_max_retries": 5}}}) == 5
-    assert should_call_tool({"breaked": False, "task_finished": "Retry solve"}) == "retry_solve"
+    assert should_continue_execution({"breaked": False, "task_finished": "Need replan"}) == "replan"
+    assert should_execute_or_replan({"breaked": True, "plan_is_valid": False, "plan_revision_count": 0}) == "end"
     valid, _ = validate_tool_call('{"name":"t","arguments":{}}', [{"name": "t", "parameters": {}}])
     assert valid
 
@@ -340,7 +307,6 @@ if __name__ == "__main__":
     test_parse_mock_tool_response_json_contract()
     test_mock_tool_response_resamples_after_invalid_json()
     test_openai_client_internal_retries_are_disabled()
-    test_invalid_tool_call_feedback_is_valid_tool_response()
     test_solver_turn_limit_returns_failure_without_extra_model_call()
     test_model_configuration_defaults()
     test_graph_helpers()
