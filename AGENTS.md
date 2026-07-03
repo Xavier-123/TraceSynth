@@ -9,6 +9,9 @@ Ignored paths:
 - logs/
 - dist/
 - output/
+- __pycache__/
+- */__pycache__/
+- **/__pycache__/
 - *.csv
 - *.parquet
 - *.pdf
