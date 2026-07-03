@@ -68,6 +68,7 @@ class SynthesisComplexity(BaseModel):
 
         # Legacy: map retrieval_rounds → max_iterations
         if "retrieval_rounds" in iter_cfg and "max_iterations" not in values:
+            # 旧配置用 retrieval_rounds 表示检索迭代轮次，新提示词统一使用 max_iterations。
             values["max_iterations"] = str(iter_cfg["retrieval_rounds"])
 
         return cls(**values)
@@ -84,6 +85,7 @@ class SynthesisComplexity(BaseModel):
                 "每轮评估后根据缺口分析返回步骤2重新优化 Query 并补检。"
             )
         )
+        # max_iterations=0 是特殊语义：明确要求非迭代任务，而不是缺省或无限制。
 
         return {
             "num_tools": format_range(self.num_tools, "个"),
@@ -135,6 +137,7 @@ class ModelConfiguration(BaseModel):
         model_name = values.get("model_name")
 
         if "api_base" in values:
+            # api_base 可直接写 URL，也可写环境变量名；优先用环境变量覆盖。
             values["api_base"] = os.getenv(values["api_base"], values["api_base"])
 
         if "api_key" not in values and "api_key_env" in values:
@@ -142,6 +145,7 @@ class ModelConfiguration(BaseModel):
             if api_key_env in ("", "EMPTY", None):
                 values["api_key"] = ""
             elif isinstance(api_key_env, str) and api_key_env.startswith("sk-"):
+                # 配置文件只允许放环境变量名，避免把真实密钥误提交到仓库。
                 raise ValueError(
                     f"api_key_env for model '{model_name}' must be an environment variable name, not a literal key"
                 )

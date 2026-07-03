@@ -24,6 +24,7 @@ from tracesynth.config_loader import load_run_config
 def apply_complexity_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Merge CLI complexity flags into config['synthesis']."""
     overrides: Dict[str, Dict[str, str]] = {"task_complexity": {}, "iteration_complexity": {}}
+    # CLI 参数只覆盖合成复杂度相关字段，避免命令行误改模型、路径等运行配置。
     mapping = {
         "num_tools": ("task_complexity", "num_tools"),
         "num_custom_tools": ("task_complexity", "num_custom_tools"),
@@ -70,7 +71,9 @@ def get_ids_to_skip(run_config: Dict[str, Any]) -> set[str]:
     processed_ids = read_processed_ids(run_config["logging"]["task_file_path"])
     retry_failed_tasks = run_config.get("processing", {}).get("retry_failed_tasks", True)
     if retry_failed_tasks:
+        # 默认只跳过成功样本，失败样本允许再次尝试生成。
         return processed_ids
+    # 关闭失败重试时，失败日志中的 id 也会被跳过，保证批处理不会反复卡在坏样本上。
     return processed_ids | read_failed_ids(get_failed_task_path(run_config))
 
 
@@ -111,6 +114,7 @@ def main():
 
             task_id = seed_info["id"]
             logger.info(f"Processing task: {task_id}")
+            # 每个任务内部独立运行 LangGraph，失败会由 run_agent 和入口兜底分别写入失败日志。
             final_state = run_agent(seed_info=seed_info, run_config=run_config)
             return is_successful_final_state(final_state)
         except Exception as e:
@@ -148,6 +152,7 @@ def main():
         )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=run_config["processing"]["max_workers"]) as executor:
+            # 任务间彼此独立，可以并发合成；文件写入由 graph 层和 IO 层的锁保护。
             future_to_task = {
                 executor.submit(process_single_task, seed_info, run_config): seed_info
                 for seed_info in tasks_to_process

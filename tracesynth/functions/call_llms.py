@@ -26,6 +26,7 @@ def messages_for_chat_completion(messages: List[Dict[str, str]]) -> List[Dict[st
     converted_messages: List[Dict[str, str]] = []
     for message in messages:
         if message.get("role") == "tool":
+            # 兼容不支持 OpenAI tool role 的普通聊天接口，把工具响应伪装成用户消息。
             converted = dict(message)
             converted["role"] = "user"
             converted_messages.append(converted)
@@ -35,6 +36,7 @@ def messages_for_chat_completion(messages: List[Dict[str, str]]) -> List[Dict[st
 
 
 def is_retryable_api_error(exc: Exception) -> bool:
+    # 只重试瞬时错误：网络、超时、限流和 5xx；格式错误或鉴权失败应立即暴露。
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)):
         return True
     if isinstance(exc, APIError):
@@ -70,6 +72,7 @@ def create_chat_completion_with_retry(
     for attempt in range(api_max_retries):
         try:
             if api_base in ["https://apihub.agnes-ai.com/v1", "https://api-inference.modelscope.cn/v1"]:
+                # Agnes/ModelScope 使用 enable_thinking 与 max_completion_tokens 控制思考和长度。
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -80,6 +83,7 @@ def create_chat_completion_with_retry(
                     },
                 )
             elif api_base in ["https://api.siliconflow.cn/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"]:
+                # SiliconFlow/DashScope 把思考开关放在 chat_template_kwargs 中。
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -103,6 +107,7 @@ def create_chat_completion_with_retry(
             last_exc = exc
             if not is_retryable_api_error(exc) or attempt >= api_max_retries - 1:
                 raise
+            # 指数退避加少量抖动，降低并发批处理时的重试碰撞。
             logger.warning(
                 "API call failed (attempt %d/%d) for model %s: %s",
                 attempt + 1,
@@ -191,6 +196,7 @@ def call_and_parse(
 
     for attempt in range(total_attempts):
         try:
+            # 第一层容错在 API 调用内部处理；这里拿到内容后再做结构解析。
             result_messages = call_llm_messages(
                 messages=working_messages,
                 api_base=cfg.api_base,
@@ -225,6 +231,7 @@ def call_and_parse(
                     last_error,
                 )
                 if feedback_on_error and last_content is not None:
+                    # 解析失败时把上一版错误输出和错误原因回灌给模型，引导它按指定格式重采样。
                     working_messages = list(working_messages)
                     working_messages.append(
                         {"role": "assistant", "content": last_content},

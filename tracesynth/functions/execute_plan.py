@@ -49,9 +49,11 @@ def _initial_solve_history_from_plan(state: AgentState, config: RunnableConfig) 
     )
     evidence_section = ""
     if state.get("tool_call_history"):
+        # 重规划后把既有工具证据注入新执行上下文，避免重复查询同一批信息。
         evidence_section = execute_plan_evidence_section_prompt.format(
             evidence_json=json.dumps(state.get("tool_call_history", []), ensure_ascii=False, indent=2)
         )
+    # 计划已经过 Planner/Evaluator 批准，执行阶段只按该计划推进。
     prompt += "\n\n" + execute_plan_preapproved_prompt.format(
         plan_json=json.dumps(state.get("plan", []), ensure_ascii=False, indent=2),
         evidence_section=evidence_section,
@@ -93,6 +95,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
     solve_history.append({"role": "assistant", "content": one_step_think_and_tool_call})
     if re.search(r"<answer>.*?</answer>", one_step_think_and_tool_call, re.DOTALL | re.IGNORECASE):
         if use_label_as_answer(config):
+            # 合成数据默认用金标覆盖模型终答，保证输出答案与监督标签一致。
             label = (state["seed_info"].get("label") or "").strip()
             if label:
                 solve_history[-1] = {
@@ -107,6 +110,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         }
 
     if tool_call_info is not None:
+        # 计划执行完后仍请求工具，说明现有证据不足；未达上限时触发重规划补检。
         max_revisions = get_plan_max_revisions(config)
         revision_count = int(state.get("plan_revision_count", 0) or 0)
         if revision_count >= max_revisions:

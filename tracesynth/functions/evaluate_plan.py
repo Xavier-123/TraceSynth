@@ -30,6 +30,7 @@ def _parse_plan_evaluation_response(content: str) -> Dict[str, Any]:
         or isinstance(evaluation.get("reason"), str)
     ):
         raise ParseError("plan_evaluation must include concrete reasons")
+    # 统一补齐可选字段，图节点合并确定性校验结果时可以直接 append/extend。
     evaluation.setdefault("reasons", [])
     evaluation.setdefault("issues", [])
     evaluation.setdefault("revision_suggestions", [])
@@ -61,6 +62,7 @@ def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[
         tool_name = step.get("tool_name")
         if tool_name not in tool_names:
             issues.append(f"plan[{index}] references unknown tool: {tool_name}")
+        # 把计划步还原为标准 tool_call，复用 Solver 的工具合法性校验规则。
         tool_call = json.dumps(
             {"name": tool_name, "arguments": step.get("arguments", {})},
             ensure_ascii=False,

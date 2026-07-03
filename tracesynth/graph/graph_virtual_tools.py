@@ -4,12 +4,12 @@ import glob
 import re
 import threading
 import logging
-from typing import Dict, Any
+from typing import TypedDict, List, Dict, Any
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
-from tracesynth.configuration import ModelConfiguration, SynthesisComplexity
+from tracesynth.configuration import ModelConfiguration, SynthesisComplexity, parse_range
 from tracesynth.io import (
     validate_seed_info,
     extract_predicted_answer,
@@ -18,36 +18,27 @@ from tracesynth.io import (
 )
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
-    mock_tool_response
+    mock_tool_response,
 )
 from tracesynth.functions.call_llms import call_and_parse
 from tracesynth.functions.fuzzy_task import is_supervised_seed
-from tracesynth.functions.evaluate_plan import (
-    basic_plan_validation,
-    build_plan_evaluation_messages,
-    parse_plan_evaluation_response,
-)
-from tracesynth.functions.plan_trajectory import build_plan_messages, parse_plan_response
-from tracesynth.functions.execute_plan import (
-    format_planned_tool_message,
-    generate_final_answer_from_plan,
-    initial_solve_history_from_plan,
-)
+from tracesynth.functions.plan_trajectory import _build_plan_messages, _parse_plan_response
+from tracesynth.functions.execute_plan import _initial_solve_history_from_plan, _generate_final_answer_from_plan, _format_planned_tool_message
+from tracesynth.functions.evaluate_plan import validate_tool_call, _build_plan_evaluation_messages, _parse_plan_evaluation_response
 from tracesynth.graph.node_utils import (
     AgentState,
     build_failure,
     create_step_config,
-    get_graph_recursion_limit,
+    get_synthesis_complexity,
+    is_non_empty_text,
     get_plan_max_revisions,
     get_solver_max_turns,
-    get_synthesis_complexity,
+    get_graph_recursion_limit,
     is_graph_recursion_error,
-    is_non_empty_text,
     is_successful_final_state,
-    validate_tool_call,
 )
 
-# Add a lock for thread-safe file writing
+# 多线程批量生成时会并发写 JSONL，统一用锁保护追加写入和失败快照。
 log_file_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
@@ -62,6 +53,7 @@ def toolset_gen_node(state: AgentState, config: RunnableConfig):
 
     seed_info = state["seed_info"]
     background_info = seed_info.get("background") or seed_info.get("question", "")
+    # 工具设计阶段只接触种子背景，负责生成初始任务、工具清单、工作流和约束。
     all_content, task, tools, workflow, restrict = generate_tool_set(
         cfg=cfg, background_info=background_info, complexity=complexity,
     )
@@ -93,6 +85,7 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
 
     seed_info = state["seed_info"]
     if is_supervised_seed(seed_info):
+        # 监督数据已有真实问题，不能再让 LLM 改写问题；这里只补虚拟交互所需背景。
         fuzzy_task = seed_info["question"]
         task_background_parts = []
         if seed_info.get("context"):
@@ -106,6 +99,7 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
         )
         if is_non_empty_text(generated_background):
             task_background_parts.append(generated_background)
+        # 背景由原始 context 和 LLM 生成背景拼接，既保留证据又补足场景设定。
         task_background = "\n\n".join(task_background_parts).strip()
         if not is_non_empty_text(task_background):
             return build_failure(
@@ -144,6 +138,30 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
     }
 
 
+def check_tools_node(state: AgentState, config: RunnableConfig):
+    logger.debug("------------------ToolCheckAgent------------------")
+
+    if state["breaked"]:
+        return {}
+
+    # Create step-specific configuration
+    step_config = create_step_config(config, "ToolCheckAgent")
+    cfg = ModelConfiguration.from_runnable_config(step_config)
+
+    initial_tools = state["initial_tools"]
+    fuzzy_task = state["fuzzy_task"]
+    complexity = get_synthesis_complexity(config)
+    checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
+
+    if checked_tools is None:
+        logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
+        return build_failure("ToolCheckAgent returned invalid JSON", **{"checked_tools": None})
+
+    return {
+        "checked_tools": checked_tools
+    }
+
+
 def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------PlanTrajectoryAgent------------------")
 
@@ -155,10 +173,11 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     complexity = get_synthesis_complexity(config)
 
     revision_count = int(state.get("plan_revision_count", 0) or 0) + 1
+    # 每次重规划都会把上一轮评估反馈注入 prompt，并递增 revision_count 供上限判断。
     plan, _ = call_and_parse(
         cfg,
-        build_plan_messages(state, complexity),
-        parse_plan_response,
+        _build_plan_messages(state, complexity),
+        _parse_plan_response,
         step_name="PlanTrajectoryAgent",
     )
     if plan is None:
@@ -183,6 +202,23 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     }
 
 
+def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
+    issues = []
+    tool_names = {tool.get("name") for tool in checked_tools}
+    for index, step in enumerate(plan):
+        tool_name = step.get("tool_name")
+        if tool_name not in tool_names:
+            issues.append(f"plan[{index}] references unknown tool: {tool_name}")
+        tool_call = json.dumps(
+            {"name": tool_name, "arguments": step.get("arguments", {})},
+            ensure_ascii=False,
+        )
+        is_valid, error = validate_tool_call(tool_call, checked_tools)
+        if not is_valid:
+            issues.append(f"plan[{index}] invalid tool call: {error}")
+    return issues
+
+
 def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------EvaluatePlanAgent------------------")
 
@@ -193,8 +229,8 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     cfg = ModelConfiguration.from_runnable_config(step_config)
     evaluation, _ = call_and_parse(
         cfg,
-        build_plan_evaluation_messages(state),
-        parse_plan_evaluation_response,
+        _build_plan_evaluation_messages(state),
+        _parse_plan_evaluation_response,
         step_name="EvaluatePlanAgent",
     )
     if evaluation is None:
@@ -206,8 +242,9 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
             },
         )
 
-    basic_issues = basic_plan_validation(state.get("plan", []), state["checked_tools"])
+    basic_issues = _basic_plan_validation(state.get("plan", []), state["checked_tools"])
     if basic_issues:
+        # LLM 评估可能漏掉结构性错误，因此再用确定性校验强制拦截未知工具和缺参计划。
         evaluation["is_valid"] = False
         evaluation.setdefault("issues", [])
         evaluation["issues"].extend(basic_issues)
@@ -216,6 +253,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
 
     max_revisions = get_plan_max_revisions(config)
     if not evaluation["is_valid"] and int(state.get("plan_revision_count", 0) or 0) >= max_revisions:
+        # 达到最大修订次数后不再继续重规划，避免图在坏计划上无限循环。
         return build_failure(
             f"EvaluatePlanAgent rejected plan after max_plan_revisions={max_revisions}",
             **{
@@ -245,6 +283,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     solver_turn_count = int(state.get("solver_turn_count", 0) or 0) + 1
     max_solver_turns = get_solver_max_turns(config)
     if solver_turn_count > max_solver_turns:
+        # Solver 回合上限是业务层停止条件，优先于 LangGraph 递归错误暴露更明确的失败原因。
         return build_failure(
             f"ExecutePlanAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
             **{
@@ -259,12 +298,14 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     if not plan:
         return build_failure("ExecutePlanAgent cannot run without a non-empty plan")
 
-    solve_history = state.get("solve_history") or initial_solve_history_from_plan(state, config)
+    solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
     current_plan_step = int(state.get("current_plan_step", 0) or 0)
     if current_plan_step >= len(plan):
-        return generate_final_answer_from_plan(state, config, solver_turn_count)
+        # 所有计划步骤完成后进入最终回答；若证据仍不足，会返回 Need replan 触发重规划。
+        return _generate_final_answer_from_plan(state, config, solver_turn_count)
 
     step = plan[current_plan_step]
+    # 计划步骤转换为标准 tool_call 字符串后，继续复用统一工具校验逻辑。
     tool_call_obj = {
         "name": step["tool_name"],
         "arguments": step.get("arguments", {}),
@@ -284,7 +325,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
 
     solve_history.append({
         "role": "assistant",
-        "content": format_planned_tool_message(step, tool_call),
+        "content": _format_planned_tool_message(step, tool_call),
     })
 
     return {
@@ -292,30 +333,6 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
         "solve_history": solve_history,
         "task_finished": "Tool call",
         "solver_turn_count": solver_turn_count,
-    }
-
-
-def check_tools_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------ToolCheckAgent------------------")
-
-    if state["breaked"]:
-        return {}
-
-    # Create step-specific configuration
-    step_config = create_step_config(config, "ToolCheckAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-
-    initial_tools = state["initial_tools"]
-    fuzzy_task = state["fuzzy_task"]
-    complexity = get_synthesis_complexity(config)
-    checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
-
-    if checked_tools is None:
-        logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
-        return build_failure("ToolCheckAgent returned invalid JSON", **{"checked_tools": None})
-
-    return {
-        "checked_tools": checked_tools
     }
 
 
@@ -362,6 +379,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
         "solve_history": solve_history
     }
     if state.get("plan"):
+        # Plan-Execute 模式下记录执行过的计划步和工具返回，供终答、重规划和落盘审计使用。
         current_plan_step = int(state.get("current_plan_step", 0) or 0)
         plan = state.get("plan", [])
         executed_steps = list(state.get("executed_steps") or [])
@@ -385,6 +403,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
 
 
 def should_execute_or_replan(state: AgentState):
+    # 评估节点后的核心路由：有效计划进入执行，无效但未超限则回到规划，否则终止。
     if state.get("breaked"):
         return "end"
     if state.get("plan_is_valid"):
@@ -397,6 +416,7 @@ def should_execute_or_replan(state: AgentState):
 
 
 def should_continue_execution(state: AgentState):
+    # ExecutePlanAgent 通过 task_finished 字符串声明下一步：调用工具、重规划或结束。
     if state.get("breaked") or state.get("task_finished") == "Terminated":
         return "end"
     if state.get("task_finished") == "Tool call":
@@ -449,6 +469,7 @@ def save_architecture_diagram(output_path: str) -> None:
 def save_failure_artifacts(solve_path: str, final_state: Dict[str, Any]) -> None:
     """Persist failed state and any partial reasoning trajectory."""
     os.makedirs(solve_path, exist_ok=True)
+    # 失败样本保留完整状态和部分轨迹，便于人工复盘或后续重试。
     with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
         f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
 
@@ -466,6 +487,7 @@ def save_failure_artifacts(solve_path: str, final_state: Dict[str, Any]) -> None
 def run_agent(seed_info: dict, run_config: dict = None):
     run_config = run_config or {}
     seed_info = validate_seed_info(seed_info)
+    # 运行入口先统一种子 schema，再读取日志、失败日志和求解产物目录配置。
     virtual_tool_use_task_path = run_config["logging"]["task_file_path"]
     failed_task_path = run_config["logging"].get(
         "failed_task_file_path",
@@ -509,6 +531,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
     max_solver_turns = get_solver_max_turns(run_config)
     run_config["recursion_limit"] = get_graph_recursion_limit(run_config, max_solver_turns)
     try:
+        # 一次图调用覆盖完整合成生命周期：工具生成、模糊任务、计划、执行和最终回答。
         final_state = graph.invoke(initial_state, config=run_config)
     except Exception as exc:
         if not is_graph_recursion_error(exc):
@@ -524,6 +547,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         )
 
     if not is_successful_final_state(final_state):
+        # 图级失败会写入失败 JSONL 和快照文件，避免只在日志里丢失失败样本。
         failure_reason = final_state.get("failure_reason") or "generation did not produce a valid final answer"
         failure_type = (
             "graph_recursion_limit"
@@ -549,6 +573,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         skip=skip_label_match,
     )
     if label_check["label_match_status"] in {"mismatch", "missing_answer"}:
+        # P0 标签校验放在成功状态之后，确保落盘轨迹不仅有答案，而且答案与金标一致。
         failure_reason = (
             "predicted answer is missing"
             if label_check["label_match_status"] == "missing_answer"
@@ -592,6 +617,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
             if match:
                 existing_numbers.append(int(match.group(1)))
 
+        # 同一任务可能多次采样，按已有 solutionN.json 自动分配下一个编号。
         next_number = max(existing_numbers) + 1 if existing_numbers else 1
         solution_filename = f"{solve_path}/solution{next_number}.json"
         save_data["solution_file"] = os.path.basename(solution_filename)

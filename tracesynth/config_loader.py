@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Mapping
 
 
 PATH_KEYS: Mapping[str, tuple[str, ...]] = {
+    # 这些配置字段会被 CLI 入口直接用于读写文件，加载时统一解析为绝对路径。
     "logging": (
         "task_file_path",
         "solve_path",
@@ -46,6 +47,7 @@ def normalize_config_paths(
         for key in keys:
             value = section_config.get(key)
             if isinstance(value, str) and value:
+                # 相对路径以配置文件所在目录为基准，而不是运行命令的当前工作目录。
                 section_config[key] = resolve_path(value, base_dir)
 
     return normalized

@@ -288,7 +288,7 @@ def load_solution_files(folder_path: str, top_k: int = 3) -> Dict[str, List[Dict
     if not folder.exists():
         raise FileNotFoundError(f"Folder not found: {folder_path}")
     
-    # Find all JSON files starting with 'solution'
+    # 只读取 solution*.json，避免把 more_info、tool_call_history 或失败快照纳入比较。
     json_files = list(folder.glob("solution*.json"))
     
     for file_path in json_files[:top_k]: # Only load top_k files
@@ -320,7 +320,7 @@ def parse_llm_response(response_content: str) -> Dict[str, str]:
         "final": "",
         "best_solution": ""
     }
-    # Extract alignment_check
+    # alignment_check 决定是否继续解析 rubrics；标记 discard 时本轮评测整体作废。
     alignment_check_match = re.search(r'<alignment_check>(.*?)</alignment_check>', response_content, re.DOTALL)
     if alignment_check_match:
         result["alignment_check"] = alignment_check_match.group(1).strip()
@@ -330,7 +330,7 @@ def parse_llm_response(response_content: str) -> Dict[str, str]:
     if result["alignment_check"] == "" or "discard" in result["alignment_check"].lower():
         return result
 
-    # Extract reasoning
+    # 只有对齐检查通过后才解析后续评测字段，避免无效样本产生误导性 rubrics。
     reasoning_match = re.search(r'<reasoning>(.*?)</reasoning>', response_content, re.DOTALL)
     if reasoning_match:
         result["reasoning"] = reasoning_match.group(1).strip()
@@ -374,7 +374,7 @@ def extract_best_solution_filename(best_solution_text: str) -> Optional[str]:
     if not best_solution_text:
         return None
     
-    # Try to match solution*.json format
+    # 优先提取规范文件名；模型偶尔只输出 solution1，此时补齐 .json 后缀。
     match = re.search(r'solution[_\-]?\w*\.json', best_solution_text, re.IGNORECASE)
     if match:
         return match.group(0)
@@ -402,7 +402,7 @@ def compare_trajectories(
     api_key: str,
     model_name: str,
 ) -> Dict:    
-    # 1. Load all solution files
+    # 1. 加载同一任务的多条求解轨迹，少于两条无法做相对比较。
     solution_files = load_solution_files(folder_path, solution_top_k)
     if len(solution_files) < 2:
         logger.warning("Not enough solution files found")
@@ -419,20 +419,20 @@ def compare_trajectories(
     task_background = more_info.get("task_background", "")
     high_level_workflow = more_info.get("initial_workflow", "")
     
-    # 2. Extract task description (from first file)
+    # 2. 任务描述来自第一条轨迹的用户请求，其他轨迹默认对应同一任务。
     first_trajectory = list(solution_files.values())[0]
     task_description = extract_task_description(first_trajectory)
     
-    # 3. Format all trajectories for comparison
+    # 3. 将多条轨迹压缩成可比较摘要，控制 prompt 长度。
     trajectories_summary = ""
     for file_name, trajectory in solution_files.items():
         trajectories_summary += format_trajectory_for_comparison(file_name, trajectory)
         trajectories_summary += "\n" + "="*80 + "\n\n"
     
-    # 4. Create comparison prompt
+    # 4. 结合限制策略、背景和高层工作流生成评测 prompt。
     system_prompt, user_prompt = create_comparison_prompt(trajectories_summary, task_description, restrict_policy, task_background, high_level_workflow)
     
-    # 5. Call LLM for comparison
+    # 5. 调用评测模型生成 rubrics、最终判断和最佳解。
     messages = call_llm_api(
         user_prompt=user_prompt,
         system_prompt=system_prompt,
@@ -443,7 +443,7 @@ def compare_trajectories(
         temperature=0.3
     )
     
-    # 6. Parse response
+    # 6. 解析 XML 标签；缺少任一关键段落时返回 None 让上层跳过写入。
     response_content = messages[-1]["content"]
     parsed_response = parse_llm_response(response_content)
     

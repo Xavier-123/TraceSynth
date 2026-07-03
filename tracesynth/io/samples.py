@@ -58,6 +58,7 @@ class SeedRecord(BaseModel):
         """Composite background for ToolSetGen and legacy prompt compatibility."""
         parts = [
             f"用户问题：{self.question}",
+            # 标准答案只给 ToolSetGen/MockTool 构造虚拟知识库，不能泄露给求解 Solver。
             f"标准答案（仅供工具设计与虚拟知识库构建，勿泄露给求解智能体）：{self.label}",
         ]
         if self.context_present:
@@ -109,11 +110,13 @@ def normalize_seed_record(
     if not isinstance(row, dict):
         raise SeedRecordError("seed row must be a JSON object")
 
+    # 不同数据集字段名不一致，先按配置中的候选字段提取问题和金标。
     question = _first_non_empty(row, cfg.question_fields)
     label = _first_non_empty(row, cfg.label_fields)
     context = _normalize_context(row.get(cfg.context_field))
 
     if cfg.legacy_persona_mode and not question:
+        # 兼容早期 persona/background 数据：没有 question 时把 persona 当作问题。
         question = _first_non_empty(row, ["persona", "background"])
     if cfg.legacy_persona_mode and not label and question:
         label = question
@@ -133,6 +136,7 @@ def normalize_seed_record(
     elif record_id is not None and str(record_id).strip():
         record_id = str(record_id).strip()
     else:
+        # 缺少显式 id 时使用 question+label 的稳定哈希，保证断点续跑可复现。
         record_id = _stable_id(question, label)
 
     return SeedRecord(
@@ -312,6 +316,7 @@ def load_seed_records(
     def _append_row(row: Dict[str, Any]) -> None:
         record = normalize_seed_record(row, cfg)
         if record.id in skip_ids:
+            # processed_ids 用于断点续跑，已处理样本不再进入本轮任务列表。
             return
         records.append(record)
         if max_tasks and len(records) >= max_tasks:
@@ -454,6 +459,7 @@ def check_label_match(
         status = "match"
         score = 1.0
     else:
+        # 精确包含失败后，用标准答案 token 覆盖率做宽松匹配，容忍解释性回答。
         pred_tokens = set(pred_norm.split())
         label_tokens = set(label_norm.split())
         overlap = pred_tokens & label_tokens

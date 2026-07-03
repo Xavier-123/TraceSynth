@@ -18,6 +18,7 @@ def _extract_xml_json(content: str, tag: str) -> Any:
     matches = re.findall(rf"<{tag}>(.+?)</{tag}>", content or "", re.DOTALL)
     if not matches:
         raise ParseError(f"missing <{tag}> tag")
+    # LLM 可能先输出草稿再自我修正，最后一个同名 XML 标签通常才是有效结果。
     raw_json = matches[-1].strip()
     try:
         return json.loads(raw_json)
@@ -37,6 +38,7 @@ def _parse_plan_response(content: str) -> List[Dict[str, Any]]:
             raise ParseError(f"plan[{index}] missing tool_name")
         if "arguments" not in step or not isinstance(step["arguments"], dict):
             raise ParseError(f"plan[{index}].arguments must be an object")
+        # 非关键展示字段允许模型漏填，后续执行只依赖 tool_name 和 arguments。
         step.setdefault("step_id", index + 1)
         step.setdefault("stage", "")
         step.setdefault("purpose", "")
@@ -50,6 +52,7 @@ def _tools_for_prompt(checked_tools: List[Dict[str, Any]]) -> str:
 
 def _build_plan_messages(state: AgentState, complexity: SynthesisComplexity) -> List[Dict[str, str]]:
     prior_evaluation = state.get("plan_evaluation") or {}
+    # prior_evaluation 用于重规划：Planner 能看到上一轮被拒原因和修订建议。
     return [
         {
             "role": "system",

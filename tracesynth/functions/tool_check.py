@@ -11,6 +11,7 @@ def _parse_checked_tools(content: str) -> List[Dict[str, Any]]:
     if not tool_matches:
         raise ParseError("missing <tools> tag")
 
+    # ToolCheckAgent 输出的是可执行工具 schema，必须是非空 JSON 数组。
     tools_str = tool_matches[-1].strip()
     try:
         checked_tools = json.loads(tools_str)
@@ -21,6 +22,7 @@ def _parse_checked_tools(content: str) -> List[Dict[str, Any]]:
         raise ParseError("checked_tools is empty or not a list")
 
     for tool in checked_tools:
+        # 最小 schema 校验：名称和 parameters 必须存在，required 参数细节由 validate_tool_call 再检查。
         if not isinstance(tool, dict) or not tool.get("name") or not isinstance(tool.get("parameters"), dict):
             raise ParseError("checked_tools contains invalid tool schema")
 

@@ -33,6 +33,7 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
     solver_turn_count = int(state.get("solver_turn_count", 0) or 0) + 1
     max_solver_turns = get_solver_max_turns(config)
     if solver_turn_count > max_solver_turns:
+        # Reason-Act 复采样也需要业务层回合上限，避免模型长期不输出 <answer>。
         return build_failure(
             f"SolveAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
             solve_history=state.get("solve_history", []),
@@ -45,6 +46,7 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
     cfg = ModelConfiguration.from_runnable_config(step_config)
 
     if not len(state.get("solve_history", [])):
+        # 首轮构造 system/user 提示词；后续轮次直接沿用已有轨迹继续推理。
         checked_tools = state["checked_tools"]
         task_info = state["fuzzy_task"]
         restrict = state["restrict"]
@@ -92,8 +94,10 @@ For each function call, return a json object with function name and arguments wi
     
     if "<answer>" not in one_step_think_and_tool_call:
         if tool_call_info is None:
+            # 没有答案也没有工具调用，说明 Solver 需要向模拟用户追问缺失信息。
             task_finished = "Transfer to user"
         else:
+            # 工具调用先做统一合法性校验，非法调用直接中断本次复采样。
             is_valid, error = validate_tool_call(tool_call_info, state["checked_tools"])
             if not is_valid:
                 return build_failure(
@@ -141,6 +145,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     }
     solve_history.append(tool_response_message)
     if new_bg_introduced:
+        # 只有工具返回引入新背景时才写入记忆，避免无信息调用污染虚拟世界状态。
         tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")
     
     return {
@@ -155,6 +160,7 @@ def mock_user_node(state: AgentState, config: RunnableConfig):
     try:
         step_config = create_step_config(config, "MockUserAgent")
     except KeyError:
+        # 旧配置可能没有 MockUserAgent，沿用 MockToolAgent 模型保持兼容。
         step_config = create_step_config(config, "MockToolAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
 
@@ -171,6 +177,7 @@ def mock_user_node(state: AgentState, config: RunnableConfig):
     }
 
 def should_call_tool(state: AgentState):
+    # task_finished 是图路由信号：终答结束、工具调用进 MockTools，否则交给 MockUser 补信息。
     if state.get("breaked") or state["task_finished"] == "Terminated":
         return "end"
     elif state["task_finished"] == "Tool call":
@@ -210,15 +217,16 @@ def run_agent(seed_info: dict, run_config: dict = None):
     graph_config["recursion_limit"] = get_graph_recursion_limit(graph_config, max_solver_turns)
 
     if len(glob.glob(f"{solve_path}/rubrics_output.json")) > 0:
+        # 已经有 rubrics 评测结果的任务不再复采样，避免覆盖后续评测依据。
         return
 
     for _ in range(repeat_times):
         solution_files = glob.glob(f"{solve_path}/solution*.json")
-        # Extract numbers from existing solution files
+        # 读取已有 solutionN.json 编号，保证重复采样追加而不是覆盖。
         existing_numbers = []
         for file in solution_files:
             basename = os.path.basename(file)
-            # Match files with pattern solution<number>.json
+            # 只匹配 solution<number>.json，忽略其他临时或评测文件。
             match = re.match(r'solution(\d+)\.json$', basename)
             if match:
                 existing_numbers.append(int(match.group(1)))
@@ -231,6 +239,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         else:
             tool_call_history = []
 
+        # 复采样复用初次合成的 more_info 和工具记忆，使多条 solution 共享同一虚拟知识库。
         if os.path.exists(more_info_path):
             with open(more_info_path, 'r', encoding='utf-8') as f:
                 more_info = json.load(f)
