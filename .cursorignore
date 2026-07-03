@@ -1,0 +1,57 @@
+# Git
+.git/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Build
+build/
+dist/
+target/
+
+# Logs
+logs/
+*.log
+
+# Cache
+.cache/
+.cache-loader/
+
+# Dataset
+data/
+dataset/
+datasets/
+
+# Models
+checkpoints/
+models/
+weights/
+
+# Output
+output/
+results/
+tmp/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Large files
+*.csv
+*.parquet
+*.zip
+*.tar
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Documents
+*.pdf
