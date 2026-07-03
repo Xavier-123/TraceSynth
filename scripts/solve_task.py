@@ -1,8 +1,6 @@
 import json
 import logging
-import yaml
 import concurrent.futures
-import os
 import argparse
 import sys
 from pathlib import Path
@@ -13,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tracesynth.graph.graph_solve_task import run_agent
+from tracesynth.config_loader import load_run_config
 from tracesynth.io import SeedRecordError, normalize_task_record, read_processed_ids
 
 
@@ -22,13 +21,10 @@ def main():
                        help='Path to the configuration file (default: configs/solve_task.yaml)')
     args = parser.parse_args()
 
-    with open(args.config, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
+    config = load_run_config(args.config)
 
-    already_processed_file = config["logging"]["already_processed_path"]
-    log_dir = os.path.dirname(already_processed_file)
-    if log_dir and not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+    already_processed_file = Path(config["logging"]["already_processed_path"])
+    already_processed_file.parent.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,

@@ -1,4 +1,5 @@
 import re
+from typing import Dict, Any
 from .call_llms import ParseError, call_and_parse
 from .prompt import fuzzy_task_prompt
 
@@ -39,3 +40,7 @@ def generate_fuzzy_task(cfg, initial_task_info, complexity=None):
     if parsed is None:
         return None, None
     return parsed
+
+
+def is_supervised_seed(seed_info: Dict[str, Any]) -> bool:
+    return bool(seed_info.get("label") and seed_info.get("question"))

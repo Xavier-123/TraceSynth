@@ -4,12 +4,12 @@ import glob
 import re
 import threading
 import logging
-from typing import TypedDict, List, Dict, Any
+from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
-from tracesynth.configuration import ModelConfiguration, SynthesisComplexity, parse_range
+from tracesynth.configuration import ModelConfiguration, SynthesisComplexity
 from tracesynth.io import (
     validate_seed_info,
     extract_predicted_answer,
@@ -18,349 +18,38 @@ from tracesynth.io import (
 )
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
-    mock_tool_response, solve_task_by_tools,
+    mock_tool_response
 )
-from tracesynth.functions.call_llms import ParseError, call_and_parse
-from tracesynth.functions.prompt import solve_task_user_prompt, solve_task_system_prompt
+from tracesynth.functions.call_llms import call_and_parse
+from tracesynth.functions.fuzzy_task import is_supervised_seed
+from tracesynth.functions.evaluate_plan import (
+    basic_plan_validation,
+    build_plan_evaluation_messages,
+    parse_plan_evaluation_response,
+)
+from tracesynth.functions.plan_trajectory import build_plan_messages, parse_plan_response
+from tracesynth.functions.execute_plan import (
+    format_planned_tool_message,
+    generate_final_answer_from_plan,
+    initial_solve_history_from_plan,
+)
+from tracesynth.graph.node_utils import (
+    AgentState,
+    build_failure,
+    create_step_config,
+    get_graph_recursion_limit,
+    get_plan_max_revisions,
+    get_solver_max_turns,
+    get_synthesis_complexity,
+    is_graph_recursion_error,
+    is_non_empty_text,
+    is_successful_final_state,
+    validate_tool_call,
+)
 
 # Add a lock for thread-safe file writing
 log_file_lock = threading.Lock()
 logger = logging.getLogger(__name__)
-
-
-class AgentState(TypedDict):
-    seed_info: Dict[str, Any]  # To store original task information
-    breaked: bool  # It will be set to False when any processing step fails
-
-    initial_toolset_create: str
-    initial_tools: str
-    initial_task: str
-    initial_workflow: str
-    restrict: str
-
-    fuzzy_task: str
-    checked_tools: List[Dict[str, Any]]
-    task_background: str
-
-    plan: List[Dict[str, Any]]
-    plan_evaluation: Dict[str, Any]
-    plan_is_valid: bool
-    plan_revision_count: int
-    max_plan_revisions: int
-    current_plan_step: int
-    executed_steps: List[Dict[str, Any]]
-    step_results: List[Dict[str, Any]]
-
-    solve_history: List[Dict[str, Any]]
-    active_plan_revision: int
-    tool_call_history: List[str]
-    current_tool_call: str
-    task_finished: str
-    failure_reason: str
-    tool_call_retry_count: int
-    solver_turn_count: int
-
-
-def build_failure(reason: str, **extra: Any) -> Dict[str, Any]:
-    payload = dict(extra)
-    payload["breaked"] = True
-    payload["task_finished"] = "Terminated"
-    payload["failure_reason"] = reason
-    return payload
-
-
-def is_non_empty_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def has_final_answer(solve_history: Any) -> bool:
-    if not isinstance(solve_history, list):
-        return False
-    return any(
-        isinstance(message, dict)
-        and message.get("role") == "assistant"
-        and re.search(r"<answer>.*?</answer>", message.get("content") or "", re.DOTALL | re.IGNORECASE)
-        for message in solve_history
-    )
-
-
-def normalize_tool_for_solver(tool: Dict[str, Any]) -> Dict[str, Any]:
-    """OpenAI-style function signatures should not include virtual return schemas."""
-    normalized = dict(tool)
-    normalized.pop("outputs", None)
-    normalized.pop("returns", None)
-    return normalized
-
-
-def validate_tool_call(tool_call: str, checked_tools: List[Dict[str, Any]]) -> tuple[bool, str | None]:
-    try:
-        parsed = json.loads(tool_call)
-    except json.JSONDecodeError as exc:
-        return False, f"tool_call is not valid JSON: {exc}"
-
-    if not isinstance(parsed, dict):
-        return False, "tool_call must be a JSON object"
-    tool_name = parsed.get("name")
-    if not tool_name:
-        return False, "tool_call is missing name"
-    if tool_name not in {tool.get("name") for tool in checked_tools}:
-        return False, f"tool_call references unknown tool: {tool_name}"
-    if "arguments" not in parsed or not isinstance(parsed["arguments"], dict):
-        return False, "tool_call.arguments must be an object"
-    tool_schema = next((tool for tool in checked_tools if tool.get("name") == tool_name), {})
-    required_args = (tool_schema.get("parameters") or {}).get("required") or []
-    missing_args = [arg for arg in required_args if arg not in parsed["arguments"]]
-    if missing_args:
-        return False, f"tool_call.arguments missing required fields: {missing_args}"
-    return True, None
-
-
-def _extract_xml_json(content: str, tag: str) -> Any:
-    matches = re.findall(rf"<{tag}>(.+?)</{tag}>", content or "", re.DOTALL)
-    if not matches:
-        raise ParseError(f"missing <{tag}> tag")
-    raw_json = matches[-1].strip()
-    try:
-        return json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise ParseError(f"invalid JSON in <{tag}>: {exc}") from exc
-
-
-def _parse_plan_response(content: str) -> List[Dict[str, Any]]:
-    plan = _extract_xml_json(content, "plan")
-    if not isinstance(plan, list) or not plan:
-        raise ParseError("plan must be a non-empty JSON array")
-
-    for index, step in enumerate(plan):
-        if not isinstance(step, dict):
-            raise ParseError(f"plan[{index}] must be an object")
-        if not isinstance(step.get("tool_name"), str) or not step["tool_name"].strip():
-            raise ParseError(f"plan[{index}] missing tool_name")
-        if "arguments" not in step or not isinstance(step["arguments"], dict):
-            raise ParseError(f"plan[{index}].arguments must be an object")
-        step.setdefault("step_id", index + 1)
-        step.setdefault("stage", "")
-        step.setdefault("purpose", "")
-        step.setdefault("depends_on", [])
-    return plan
-
-
-def _parse_plan_evaluation_response(content: str) -> Dict[str, Any]:
-    evaluation = _extract_xml_json(content, "plan_evaluation")
-    if not isinstance(evaluation, dict):
-        raise ParseError("plan_evaluation must be a JSON object")
-    if "is_valid" not in evaluation or not isinstance(evaluation["is_valid"], bool):
-        raise ParseError("plan_evaluation.is_valid must be a boolean")
-    if not (
-        isinstance(evaluation.get("reasons"), list)
-        or isinstance(evaluation.get("evaluation"), str)
-        or isinstance(evaluation.get("reason"), str)
-    ):
-        raise ParseError("plan_evaluation must include concrete reasons")
-    evaluation.setdefault("reasons", [])
-    evaluation.setdefault("issues", [])
-    evaluation.setdefault("revision_suggestions", [])
-    return evaluation
-
-
-def _tools_for_prompt(checked_tools: List[Dict[str, Any]]) -> str:
-    return json.dumps(checked_tools, ensure_ascii=False, indent=2)
-
-
-def _build_plan_messages(state: AgentState, complexity: SynthesisComplexity) -> List[Dict[str, str]]:
-    prior_evaluation = state.get("plan_evaluation") or {}
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a planning agent for an Agentic RAG LangGraph pipeline. "
-                "Create a complete tool-use trajectory before execution. "
-                "Return only one <plan> XML block containing a JSON array."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"User query:\n{state['fuzzy_task']}\n\n"
-                f"Task background:\n{state.get('task_background', '')}\n\n"
-                f"High-level workflow:\n{state.get('initial_workflow', '')}\n\n"
-                f"Policy/restrictions:\n{state.get('restrict', '')}\n\n"
-                f"Complexity:\n{complexity.to_prompt_vars()['complexity_summary']}\n\n"
-                f"Available tools JSON:\n{_tools_for_prompt(state['checked_tools'])}\n\n"
-                f"Previous evaluation, if any:\n{json.dumps(prior_evaluation, ensure_ascii=False)}\n\n"
-                "Plan requirements:\n"
-                "1. Select only useful tools from the available tool list and avoid distractor tools.\n"
-                "2. Cover Agentic RAG step2 query optimization, step3 retrieval, step4 post-processing, "
-                "and step5 sufficiency/relevance evaluation whenever matching tools exist.\n"
-                "3. Include explicit step dependencies and parameter sources.\n"
-                "4. If iterative retrieval may be needed, include evaluation-driven follow-up steps within "
-                "the bounded iteration requirement.\n"
-                "5. Do not generate the final answer and do not call tools.\n\n"
-                "Return format:\n"
-                "<plan>\n"
-                "[{\"step_id\":1,\"stage\":\"query_optimization\",\"tool_name\":\"ToolName\","
-                "\"arguments\":{},\"purpose\":\"why this step is needed\","
-                "\"depends_on\":[],\"parameter_sources\":{\"arg\":\"input or prior step\"}}]\n"
-                "</plan>"
-            ),
-        },
-    ]
-
-
-def _build_plan_evaluation_messages(state: AgentState) -> List[Dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a strict evaluator for a planned Agentic RAG tool trajectory. "
-                "Evaluate the plan before any execution. Return only one <plan_evaluation> XML block "
-                "containing a JSON object."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"User query:\n{state['fuzzy_task']}\n\n"
-                f"Policy/restrictions:\n{state.get('restrict', '')}\n\n"
-                f"Available tools JSON:\n{_tools_for_prompt(state['checked_tools'])}\n\n"
-                f"Plan JSON:\n{json.dumps(state.get('plan', []), ensure_ascii=False, indent=2)}\n\n"
-                "Evaluate these dimensions: tool legality, required parameters, process coverage, "
-                "dependency correctness, distractor-tool avoidance, iteration design, and policy compliance. "
-                "Whether valid or invalid, give concrete reasons.\n\n"
-                "Return format:\n"
-                "<plan_evaluation>\n"
-                "{\"is_valid\": true, \"reasons\": [\"...\"], \"issues\": [], "
-                "\"revision_suggestions\": []}\n"
-                "</plan_evaluation>"
-            ),
-        },
-    ]
-
-
-def is_successful_final_state(final_state: Dict[str, Any], strict=True) -> bool:
-    if strict:
-        return (
-            not final_state.get("breaked")
-            and isinstance(final_state.get("checked_tools"), list)
-            and bool(final_state["checked_tools"])
-            and has_final_answer(final_state.get("solve_history"))
-        )
-    else:
-        return not final_state.get("breaked") and has_final_answer(final_state.get("solve_history"))
-
-
-def create_step_config(
-        base_config: RunnableConfig, step_name: str,
-) -> RunnableConfig:
-    """Create a new configuration for a specific step with its designated model"""
-    # cfg = AgentConfiguration.from_runnable_config(base_config)
-    step_models = base_config["configurable"]["step_models"]
-    fallback_step = "Fallback" if step_name in {"PlanTrajectoryAgent", "EvaluatePlanAgent", "ExecutePlanAgent"} else step_name
-    step_model_config = step_models.get(step_name) or step_models[fallback_step]
-
-    # Create a new config with the specific model for this step
-    step_config = {}
-    if "configurable" not in step_config:
-        step_config["configurable"] = {}
-
-    # Apply the step-specific model configuration
-    step_config["configurable"]["model_name"] = step_model_config["name"]
-    if "temperature" in step_model_config:
-        step_config["configurable"]["temperature"] = step_model_config["temperature"]
-    if "max_tokens" in step_model_config:
-        step_config["configurable"]["max_tokens"] = step_model_config["max_tokens"]
-    if "use_tools" in step_model_config:
-        step_config["configurable"]["use_tools"] = step_model_config["use_tools"]
-    if "use_thinking" in step_model_config:
-        step_config["configurable"]["use_thinking"] = step_model_config["use_thinking"]
-    if "api_base" in step_model_config:
-        step_config["configurable"]["api_base"] = step_model_config["api_base"]
-    if "api_key_env" in step_model_config:
-        step_config["configurable"]["api_key_env"] = step_model_config["api_key_env"]
-
-    retry_cfg = base_config["configurable"].get("retry", {})
-    for key in ("api_max_retries", "api_retry_base", "parse_max_retries", "tool_call_max_retries"):
-        if key in retry_cfg:
-            step_config["configurable"][key] = retry_cfg[key]
-
-    return step_config
-
-
-def get_tool_call_max_retries(config: RunnableConfig) -> int:
-    retry_cfg = config.get("configurable", {}).get("retry", {})
-    return int(retry_cfg.get("tool_call_max_retries", 3))
-
-
-def get_plan_max_revisions(config: RunnableConfig) -> int:
-    configurable = config.get("configurable", {}) if config else {}
-    for value in (
-        configurable.get("max_plan_revisions"),
-        (configurable.get("processing") or {}).get("max_plan_revisions"),
-        (configurable.get("planner") or {}).get("max_revisions"),
-        (configurable.get("retry") or {}).get("max_plan_revisions"),
-    ):
-        if value is not None:
-            return _coerce_positive_int(value, 3)
-    return 3
-
-
-def _coerce_positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def get_solver_max_turns(config: RunnableConfig) -> int:
-    configurable = config.get("configurable", {}) if config else {}
-
-    for value in (
-        configurable.get("max_solver_turns"),
-        (configurable.get("processing") or {}).get("max_solver_turns"),
-        (configurable.get("solver") or {}).get("max_turns"),
-        (configurable.get("retry") or {}).get("max_solver_turns"),
-    ):
-        if value is not None:
-            return _coerce_positive_int(value, 18)
-
-    _, max_iterations = parse_range(get_synthesis_complexity(config).max_iterations)
-    return max(12, 6 * (max_iterations + 1) + 6)
-
-
-def get_graph_recursion_limit(config: RunnableConfig, max_solver_turns: int) -> int:
-    configurable = config.get("configurable", {}) if config else {}
-    configured = (
-        configurable.get("recursion_limit")
-        or (configurable.get("processing") or {}).get("graph_recursion_limit")
-        or (configurable.get("processing") or {}).get("recursion_limit")
-    )
-    estimated = max(60, 3 + (2 * max_solver_turns) + 10)
-    return max(_coerce_positive_int(configured, estimated), estimated)
-
-
-def is_graph_recursion_error(exc: Exception) -> bool:
-    text = str(exc)
-    return (
-        exc.__class__.__name__ == "GraphRecursionError"
-        or (
-            "Recursion limit" in text
-            and "recursion_limit" in text
-        )
-    )
-
-
-def use_label_as_answer(config: RunnableConfig) -> bool:
-    eval_cfg = config.get("configurable", {}).get("evaluation") or {}
-    return bool(eval_cfg.get("use_label_as_answer", True))
-
-
-def get_synthesis_complexity(config: RunnableConfig) -> SynthesisComplexity:
-    return SynthesisComplexity.from_run_config(config.get("configurable", {}))
-
-
-def is_supervised_seed(seed_info: Dict[str, Any]) -> bool:
-    return bool(seed_info.get("label") and seed_info.get("question"))
 
 
 def toolset_gen_node(state: AgentState, config: RunnableConfig):
@@ -455,30 +144,6 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
     }
 
 
-def check_tools_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------ToolCheckAgent------------------")
-
-    if state["breaked"]:
-        return {}
-
-    # Create step-specific configuration
-    step_config = create_step_config(config, "ToolCheckAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-
-    initial_tools = state["initial_tools"]
-    fuzzy_task = state["fuzzy_task"]
-    complexity = get_synthesis_complexity(config)
-    checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
-
-    if checked_tools is None:
-        logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
-        return build_failure("ToolCheckAgent returned invalid JSON", **{"checked_tools": None})
-
-    return {
-        "checked_tools": checked_tools
-    }
-
-
 def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------PlanTrajectoryAgent------------------")
 
@@ -492,8 +157,8 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     revision_count = int(state.get("plan_revision_count", 0) or 0) + 1
     plan, _ = call_and_parse(
         cfg,
-        _build_plan_messages(state, complexity),
-        _parse_plan_response,
+        build_plan_messages(state, complexity),
+        parse_plan_response,
         step_name="PlanTrajectoryAgent",
     )
     if plan is None:
@@ -518,23 +183,6 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     }
 
 
-def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
-    issues = []
-    tool_names = {tool.get("name") for tool in checked_tools}
-    for index, step in enumerate(plan):
-        tool_name = step.get("tool_name")
-        if tool_name not in tool_names:
-            issues.append(f"plan[{index}] references unknown tool: {tool_name}")
-        tool_call = json.dumps(
-            {"name": tool_name, "arguments": step.get("arguments", {})},
-            ensure_ascii=False,
-        )
-        is_valid, error = validate_tool_call(tool_call, checked_tools)
-        if not is_valid:
-            issues.append(f"plan[{index}] invalid tool call: {error}")
-    return issues
-
-
 def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------EvaluatePlanAgent------------------")
 
@@ -545,8 +193,8 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     cfg = ModelConfiguration.from_runnable_config(step_config)
     evaluation, _ = call_and_parse(
         cfg,
-        _build_plan_evaluation_messages(state),
-        _parse_plan_evaluation_response,
+        build_plan_evaluation_messages(state),
+        parse_plan_evaluation_response,
         step_name="EvaluatePlanAgent",
     )
     if evaluation is None:
@@ -558,7 +206,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
             },
         )
 
-    basic_issues = _basic_plan_validation(state.get("plan", []), state["checked_tools"])
+    basic_issues = basic_plan_validation(state.get("plan", []), state["checked_tools"])
     if basic_issues:
         evaluation["is_valid"] = False
         evaluation.setdefault("issues", [])
@@ -583,147 +231,6 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
         "plan_evaluation": evaluation,
         "max_plan_revisions": max_revisions,
     }
-
-
-def _initial_solve_history_from_plan(state: AgentState, config: RunnableConfig) -> List[Dict[str, Any]]:
-    checked_tools = state["checked_tools"]
-    task_info = state["fuzzy_task"]
-    restrict = state.get("restrict", "")
-    complexity = get_synthesis_complexity(config)
-
-    tools_description = ""
-    for tool in checked_tools:
-        tools_description += json.dumps(
-            {"type": "function", "function": normalize_tool_for_solver(tool)},
-            ensure_ascii=False,
-        ) + "\n"
-
-    system_prompt = solve_task_system_prompt.format(available_tools=tools_description, restrict=restrict)
-    prompt = solve_task_user_prompt.format(
-        task_info=task_info,
-        **complexity.to_prompt_vars(),
-    )
-    prompt += (
-        "\n\n## Pre-approved execution plan\n"
-        "The planner and evaluator have already selected the following trajectory. "
-        "During execution, follow this plan and do not invent extra tool calls unless the plan is exhausted "
-        "and the accumulated evidence is still insufficient.\n"
-        f"{json.dumps(state.get('plan', []), ensure_ascii=False, indent=2)}"
-    )
-    if state.get("tool_call_history"):
-        prompt += (
-            "\n\n## Evidence already gathered before this plan revision\n"
-            f"{json.dumps(state.get('tool_call_history', []), ensure_ascii=False, indent=2)}"
-        )
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
-
-
-def _format_planned_tool_message(step: Dict[str, Any], tool_call: str) -> str:
-    return (
-        f"Executing planned step {step.get('step_id')}: {step.get('purpose', '')}\n"
-        f"Stage: {step.get('stage', '')}\n"
-        f"<tool_call>{tool_call}</tool_call>"
-    )
-
-
-def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, solver_turn_count: int) -> Dict[str, Any]:
-    step_config = create_step_config(config, "ExecutePlanAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-    solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
-
-    final_prompt = (
-        "The planned tool trajectory has completed. Use only the accumulated tool responses and "
-        "the task context to produce the final answer. Return the answer wrapped in <answer></answer>. "
-        "If evidence is insufficient, briefly state the missing evidence instead of inventing facts."
-    )
-    solve_history.append({"role": "user", "content": final_prompt})
-
-    one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
-    if not is_non_empty_text(one_step_think_and_tool_call):
-        return build_failure(
-            "Final Response returned empty final answer content",
-            **{
-                "solve_history": solve_history,
-                "tool_call_history": state.get("tool_call_history", []),
-                "solver_turn_count": solver_turn_count,
-            },
-        )
-
-    solve_history.append({"role": "assistant", "content": one_step_think_and_tool_call})
-    if re.search(r"<answer>.*?</answer>", one_step_think_and_tool_call, re.DOTALL | re.IGNORECASE):
-        if use_label_as_answer(config):
-            label = (state["seed_info"].get("label") or "").strip()
-            if label:
-                solve_history[-1] = {
-                    "role": "assistant",
-                    "content": f"<answer>{label}</answer>",
-                }
-        return {
-            "current_tool_call": None,
-            "solve_history": solve_history,
-            "task_finished": "Terminated",
-            "solver_turn_count": solver_turn_count,
-        }
-
-    if tool_call_info is not None:
-        max_revisions = get_plan_max_revisions(config)
-        revision_count = int(state.get("plan_revision_count", 0) or 0)
-        if revision_count >= max_revisions:
-            return build_failure(
-                "plan exhausted but evidence still insufficient after max revisions",
-                **{
-                    "solve_history": solve_history,
-                    "tool_call_history": state.get("tool_call_history", []),
-                    "solver_turn_count": solver_turn_count,
-                    "plan_revision_count": revision_count,
-                    "max_plan_revisions": max_revisions,
-                    "plan_evaluation": {
-                        "is_valid": False,
-                        "reasons": [
-                            "The completed plan did not provide enough evidence for the final answer."
-                        ],
-                        "issues": [
-                            "Final Response requested an additional tool call after executing all planned steps."
-                        ],
-                        "revision_suggestions": [
-                            "Revise the plan to include the missing evidence-gathering step before final answering."
-                        ],
-                    },
-                    "plan_is_valid": False,
-                },
-            )
-        return {
-            "current_tool_call": None,
-            "solve_history": solve_history,
-            "task_finished": "Need replan",
-            "solver_turn_count": solver_turn_count,
-            "plan_evaluation": {
-                "is_valid": False,
-                "reasons": [
-                    "The completed plan did not provide enough evidence for the final answer."
-                ],
-                "issues": [
-                    "Final Response requested an additional tool call after executing all planned steps."
-                ],
-                "revision_suggestions": [
-                    "Revise the plan to include the missing evidence-gathering step before final answering."
-                ],
-            },
-            "plan_is_valid": False,
-        }
-
-    return build_failure(
-        "Final Response completed planned execution but did not produce <answer>",
-        **{
-            "solve_history": solve_history,
-            "tool_call_history": state.get("tool_call_history", []),
-            "solver_turn_count": solver_turn_count,
-        },
-    )
 
 
 def execute_plan_node(state: AgentState, config: RunnableConfig):
@@ -752,10 +259,10 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     if not plan:
         return build_failure("ExecutePlanAgent cannot run without a non-empty plan")
 
-    solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
+    solve_history = state.get("solve_history") or initial_solve_history_from_plan(state, config)
     current_plan_step = int(state.get("current_plan_step", 0) or 0)
     if current_plan_step >= len(plan):
-        return _generate_final_answer_from_plan(state, config, solver_turn_count)
+        return generate_final_answer_from_plan(state, config, solver_turn_count)
 
     step = plan[current_plan_step]
     tool_call_obj = {
@@ -777,7 +284,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
 
     solve_history.append({
         "role": "assistant",
-        "content": _format_planned_tool_message(step, tool_call),
+        "content": format_planned_tool_message(step, tool_call),
     })
 
     return {
@@ -785,6 +292,30 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
         "solve_history": solve_history,
         "task_finished": "Tool call",
         "solver_turn_count": solver_turn_count,
+    }
+
+
+def check_tools_node(state: AgentState, config: RunnableConfig):
+    logger.debug("------------------ToolCheckAgent------------------")
+
+    if state["breaked"]:
+        return {}
+
+    # Create step-specific configuration
+    step_config = create_step_config(config, "ToolCheckAgent")
+    cfg = ModelConfiguration.from_runnable_config(step_config)
+
+    initial_tools = state["initial_tools"]
+    fuzzy_task = state["fuzzy_task"]
+    complexity = get_synthesis_complexity(config)
+    checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
+
+    if checked_tools is None:
+        logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
+        return build_failure("ToolCheckAgent returned invalid JSON", **{"checked_tools": None})
+
+    return {
+        "checked_tools": checked_tools
     }
 
 

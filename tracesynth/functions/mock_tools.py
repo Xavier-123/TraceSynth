@@ -3,7 +3,7 @@ import re
 from typing import Any, Dict, Tuple, Union
 
 from .call_llms import ParseError, call_and_parse
-from .prompt import tool_simulation_prompt_with_memory
+from .prompt import tool_simulation_prompt_with_memory, mock_tool_system_prompt, mock_tool_user_prompt
 
 
 def _parse_mock_tool_response(response_text: str) -> Tuple[Union[Dict[str, Any], str], bool]:
@@ -42,7 +42,8 @@ def mock_tool_response(
 
     if complexity is None:
         complexity = SynthesisComplexity()
-    prompt = tool_simulation_prompt_with_memory.format(
+    # prompt = tool_simulation_prompt_with_memory.format(
+    prompt = mock_tool_user_prompt.format(
         query=query,
         tools=tool_description,
         world_state=json.dumps(history_interactions),
@@ -51,7 +52,7 @@ def mock_tool_response(
         **complexity.to_prompt_vars(),
     )
     messages = [
-        {"role": "system", "content": ""},
+        {"role": "system", "content": mock_tool_system_prompt},
         {"role": "user", "content": prompt},
     ]
     parsed, _ = call_and_parse(

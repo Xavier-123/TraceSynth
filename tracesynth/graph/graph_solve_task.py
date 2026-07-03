@@ -4,69 +4,43 @@ import yaml
 import glob
 import re
 import threading
-from typing import TypedDict, List, Dict, Any
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
-from configuration import ModelConfiguration
-from functions import (
+from tracesynth.configuration import ModelConfiguration
+from tracesynth.functions import (
     mock_tool_response, solve_task_by_tools, mock_user_response
 )
+from tracesynth.graph.node_utils import (
+    AgentState,
+    build_failure,
+    create_step_config,
+    get_graph_recursion_limit,
+    get_solver_max_turns,
+    is_graph_recursion_error,
+    validate_tool_call,
+)
 
-# Add a lock for thread-safe file writing
 log_file_lock = threading.Lock()
-
-class AgentState(TypedDict):
-    breaked: bool # It will be set to False when any processing step fails
-
-    fuzzy_task: str
-    checked_tools: List[Dict[str, Any]]
-    restrict: str
-    task_background: str
-
-    solve_history: List[Dict[str, Any]]
-    tool_call_history: List[str]
-    current_tool_call: str
-    task_finished: str
-
-def create_step_config(
-        base_config: RunnableConfig, step_name: str, 
-    ) -> RunnableConfig:
-    """Create a new configuration for a specific step with its designated model"""
-    # cfg = AgentConfiguration.from_runnable_config(base_config)
-    step_model_config = base_config["configurable"]["step_models"][step_name]
-    
-    # Create a new config with the specific model for this step
-    step_config = {}
-    if "configurable" not in step_config:
-        step_config["configurable"] = {}
-        
-    # Apply the step-specific model configuration
-    step_config["configurable"]["model_name"] = step_model_config["name"]
-    if "temperature" in step_model_config:
-        step_config["configurable"]["temperature"] = step_model_config["temperature"]
-    if "max_tokens" in step_model_config:
-        step_config["configurable"]["max_tokens"] = step_model_config["max_tokens"]
-    if "use_tools" in step_model_config:
-        step_config["configurable"]["use_tools"] = step_model_config["use_tools"]
-    if "use_thinking" in step_model_config:
-        step_config["configurable"]["use_thinking"] = step_model_config["use_thinking"]
-    if "api_base" in step_model_config:
-        step_config["configurable"]["api_base"] = step_model_config["api_base"]
-    if "api_key_env" in step_model_config:
-        step_config["configurable"]["api_key_env"] = step_model_config["api_key_env"]
-
-    return step_config
 def solve_task_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
         return {
             "current_tool_call": None,
-            "solve_history": None,
             "task_finished": "Terminated"
         }
 
-    # Create step-specific configuration
+    solver_turn_count = int(state.get("solver_turn_count", 0) or 0) + 1
+    max_solver_turns = get_solver_max_turns(config)
+    if solver_turn_count > max_solver_turns:
+        return build_failure(
+            f"SolveAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
+            solve_history=state.get("solve_history", []),
+            tool_call_history=state.get("tool_call_history", []),
+            solver_turn_count=solver_turn_count,
+            max_solver_turns=max_solver_turns,
+        )
+
     step_config = create_step_config(config, "SolveAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
 
@@ -120,6 +94,15 @@ For each function call, return a json object with function name and arguments wi
         if tool_call_info is None:
             task_finished = "Transfer to user"
         else:
+            is_valid, error = validate_tool_call(tool_call_info, state["checked_tools"])
+            if not is_valid:
+                return build_failure(
+                    error or "Invalid tool_call",
+                    current_tool_call=tool_call_info,
+                    solve_history=solve_history,
+                    tool_call_history=state.get("tool_call_history", []),
+                    solver_turn_count=solver_turn_count,
+                )
             task_finished = "Tool call"
     else:
         task_finished = "Terminated"
@@ -128,10 +111,14 @@ For each function call, return a json object with function name and arguments wi
     return {
         "current_tool_call": tool_call_info,
         "solve_history": solve_history,
-        "task_finished": task_finished
+        "task_finished": task_finished,
+        "solver_turn_count": solver_turn_count,
     }
 
 def mock_tools_node(state: AgentState, config: RunnableConfig):
+    if state["breaked"]:
+        return {}
+
     step_config = create_step_config(config, "MockToolAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
 
@@ -141,6 +128,14 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     solve_history = state["solve_history"]
 
     tool_response, new_bg_introduced = mock_tool_response(cfg, tool_call, tools_description, tool_call_history)
+    if tool_response is None:
+        return build_failure(
+            "MockToolAgent returned no tool response",
+            solve_history=solve_history,
+            tool_call_history=tool_call_history,
+            current_tool_call=tool_call,
+        )
+
     tool_response_message = {
         "role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"
     }
@@ -154,7 +149,13 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     }
 
 def mock_user_node(state: AgentState, config: RunnableConfig):
-    step_config = create_step_config(config, "MockToolAgent")
+    if state["breaked"]:
+        return {}
+
+    try:
+        step_config = create_step_config(config, "MockUserAgent")
+    except KeyError:
+        step_config = create_step_config(config, "MockToolAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
 
     fuzzy_task = state["fuzzy_task"]
@@ -170,7 +171,7 @@ def mock_user_node(state: AgentState, config: RunnableConfig):
     }
 
 def should_call_tool(state: AgentState):
-    if state["task_finished"] == "Terminated":
+    if state.get("breaked") or state["task_finished"] == "Terminated":
         return "end"
     elif state["task_finished"] == "Tool call":
         return "tool_call"
@@ -204,7 +205,9 @@ def run_agent(seed_info: dict, run_config: dict = None):
 
     tool_call_history_path = f"{solve_path}/tool_call_history.json"
     more_info_path = f"{solve_path}/more_info.json"
-    run_config = {"configurable": run_config or {}}
+    graph_config = {"configurable": run_config or {}}
+    max_solver_turns = get_solver_max_turns(graph_config)
+    graph_config["recursion_limit"] = get_graph_recursion_limit(graph_config, max_solver_turns)
 
     if len(glob.glob(f"{solve_path}/rubrics_output.json")) > 0:
         return
@@ -241,11 +244,25 @@ def run_agent(seed_info: dict, run_config: dict = None):
             "restrict": more_info.get("restrict", ""),
             "breaked": False,
             "task_finished": False,
+            "failure_reason": "",
             "solve_history": [],
-            "tool_call_history": tool_call_history
+            "tool_call_history": tool_call_history,
+            "tool_call_retry_count": 0,
+            "solver_turn_count": 0,
         }
-        run_config["recursion_limit"] = 50
-        final_state = graph.invoke(initial_state, config=run_config)
+        try:
+            final_state = graph.invoke(initial_state, config=graph_config)
+        except Exception as exc:
+            if not is_graph_recursion_error(exc):
+                raise
+            final_state = build_failure(
+                f"LangGraph recursion limit reached before stop condition: {exc}",
+                **{
+                    **initial_state,
+                    "max_solver_turns": max_solver_turns,
+                    "recursion_limit": graph_config["recursion_limit"],
+                },
+            )
 
         solution_filename = f"{solve_path}/solution{next_number}.json"
 

@@ -269,7 +269,7 @@ def test_solver_turn_limit_returns_failure_without_extra_model_call():
         }
     }
 
-    with patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools") as mock_solve:
+    with patch("tracesynth.graph.execute_plan_node.solve_task_by_tools") as mock_solve:
         update = execute_plan_node(state, config)
 
     mock_solve.assert_not_called()

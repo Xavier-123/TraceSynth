@@ -18,26 +18,7 @@ from tracesynth.io import (
     read_processed_ids,
     write_failure_record,
 )
-
-
-def resolve_path(path_value: str, base_dir: Path) -> str:
-    """Resolve config paths relative to the config file location."""
-    path = Path(path_value)
-    if path.is_absolute():
-        return str(path)
-    return str((base_dir / path).resolve())
-
-
-def normalize_config_paths(config: Dict[str, Any], config_path: Path) -> Dict[str, Any]:
-    base_dir = config_path.parent
-    for section, keys in {
-        "logging": ("task_file_path", "solve_path", "failed_task_file_path"),
-        "paths": ("data_file",),
-    }.items():
-        for key in keys:
-            if key in config.get(section, {}):
-                config[section][key] = resolve_path(config[section][key], base_dir)
-    return config
+from tracesynth.config_loader import load_run_config
 
 
 def apply_complexity_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -104,12 +85,7 @@ def main():
     complexity.add_argument('--max-iterations', type=str, help='e.g. "1~2", use "0" for no iteration')
     args = parser.parse_args()
 
-    config_path = Path(args.config).resolve()
-    import yaml
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    config = normalize_config_paths(config, config_path)
+    config = load_run_config(args.config)
     config = apply_complexity_cli_overrides(config, args)
 
     logging.basicConfig(

@@ -2,10 +2,13 @@ import os
 import re
 import json
 import logging
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
-from functions import call_llm_api
+
+from tracesynth.config_loader import load_run_config
+from tracesynth.functions.call_llms import call_llm_api
 
 # Configure logging
 logging.basicConfig(
@@ -458,15 +461,20 @@ def compare_trajectories(
     }
 
 
-# Usage example
-if __name__ == "__main__":
-    import yaml
-    from dotenv import load_dotenv
+def main():
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from threading import Lock
-    
-    with open("configs/rubrics.yaml", 'r', encoding='utf-8') as f:
-        agent_config = yaml.safe_load(f)
+
+    parser = argparse.ArgumentParser(description="Generate rubrics from solve trajectories")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/rubrics.yaml",
+        help="Path to the rubrics configuration file",
+    )
+    args = parser.parse_args()
+
+    agent_config = load_run_config(args.config)
 
     load_dotenv()
     load_dotenv(".local.env", override=True)
@@ -483,6 +491,9 @@ if __name__ == "__main__":
     solution_top_k = rubrics_step["solution_top_k"]
     solution_path = agent_config["paths"]["solution_path"]
     already_processed_path = agent_config["logging"]["already_processed_path"]
+    already_processed_dir = os.path.dirname(already_processed_path)
+    if already_processed_dir:
+        os.makedirs(already_processed_dir, exist_ok=True)
 
     # 读取已处理的任务
     if os.path.exists(already_processed_path):
@@ -516,7 +527,7 @@ if __name__ == "__main__":
                 # 使用锁保护文件写入
                 with file_lock:
                     with open(already_processed_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"id": specific_task}) + '\n')
+                        f.write(json.dumps({"id": specific_task}, ensure_ascii=False) + '\n')
                                 
                 return specific_task, True, None
             else:
@@ -573,3 +584,7 @@ if __name__ == "__main__":
     logger.info(f"Successful: {success_count}")
     logger.info(f"Failed: {failure_count}")
     logger.info("="*50)
+
+
+if __name__ == "__main__":
+    main()

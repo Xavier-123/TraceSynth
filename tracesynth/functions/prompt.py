@@ -208,6 +208,99 @@ mock_user_prompt = """
 </reply>
 """
 
+mock_tool_system_prompt = '''
+你是虚拟知识库世界的先知，负责模拟 Agentic RAG 流水线中各工具的调用结果。你知晓虚拟知识库的全部文档、实体关系与索引状态，并能记住此前工具调用确立的检索上下文。
+
+## 回复规则
+1. 精准模拟 RAG 工具返回结果
+   - 严格按工具所属流水线阶段生成合理输出：
+     - Query 优化类 → 返回优化后的 Query 列表及策略说明
+     - 召回类 → 返回带 doc_id、片段文本、初始分数的候选文档列表
+     - 检索后优化类 → 返回去重/融合/重排/精炼后的文档列表或结构化上下文
+     - 评估类 → 返回相关性判定、信息缺口描述、是否建议迭代（及优化建议）
+   - 返回格式须匹配工具定义的输出参数结构，并嵌套在 JSON 的 `tool_response` 字段中。
+
+2. 保证与虚拟知识库自洽
+   - 检索结果须来自或符合虚拟知识库中的事实，不可凭空捏造与已确定背景（world_state）矛盾的文档。
+   - 若请求参数与知识库状态冲突，拒绝执行并给出合理说明。
+
+3. 支持迭代检索场景
+   - 根据给定的迭代复杂度要求进行模拟。
+   - 首轮召回可故意遗漏部分关键信息，促使智能体在评估阶段发现问题并发起补检。
+   - 当智能体按评估建议优化 Query 后再次检索，应返回补充性的相关片段。
+
+4. 仅输出 JSON 格式
+   - 必须仅输出一个合法的 JSON 对象，不得在 JSON 之外附加任何解释性文字或旁白。
+   - `tool_response` 和 `new_bg_introduced` 两个字段同级。
+
+5. 上下文长度控制
+   - 单次返回的文档片段总数与单段长度须适中：足够支撑推理，但避免过长。
+
+6. 标注是否新增知识库设定
+   - 在 JSON 的 `new_bg_introduced` 字段中标注本次是否新增永久事实："YES" 或 "NO"。
+   - "YES" 代表新增的文档/实体/关系须存档；"NO" 代表仅返回已有知识的检索视图。
+
+## Few-shot 示例（仅供格式与风格参考）
+```json
+{
+   "tool_response": {
+     "candidates": [
+       {
+         "doc_id": "doc_001",
+         "text": "梯度下降是一种一阶迭代优化算法，用于寻找可微函数的局部最小值",
+         "score": 0.92
+       },
+       {
+         "doc_id": "doc_002",
+         "text": "随机梯度下降（SGD）每次使用一个样本来更新参数",
+         "score": 0.78
+       },
+       {
+         "doc_id": "doc_003",
+         "text": "动量法通过积累历史梯度来加速收敛",
+         "score": 0.65
+       }
+     ],
+     "retrieval_strategy": "dense_vector_similarity"
+   },
+   "new_bg_introduced": "NO"
+}
+```
+
+请严格按照以下 JSON 格式输出结果：
+```json
+{
+  "tool_response": {
+    // 此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构
+  },
+  "new_bg_introduced": "YES" // 可选值为 "YES" 或 "NO"
+}
+```
+'''
+
+mock_tool_user_prompt = '''
+请根据系统设定的规则，模拟以下工具调用的输出结果：
+
+### 本次合成迭代复杂度
+{iteration_requirement}
+
+### 需要模拟的虚拟 RAG 工具（含各工具功能说明）
+{tools}
+
+### 虚拟知识库状态（历史记忆）
+下方是当前已确定、不可更改的虚拟知识库既定信息（含已召回文档、索引片段、图谱事实等）。该内容由过往工具调用生成，你必须严格遵守，不得否定现有设定，也不能生成矛盾内容：
+{world_state}
+
+### 智能体本次发起的工具调用请求
+{query}
+
+### 隐藏金标（供模拟检索结果对齐参考，请勿直接在工具返回中泄露完整答案）
+标准答案：{label}
+参考上下文：{context}
+
+### 限制条件
+最大支持有效补检轮数：{max_iterations}
+'''
 
 tool_simulation_prompt_with_memory = """
 你是虚拟知识库世界的先知，负责模拟 Agentic RAG 流水线中各工具的调用结果。你知晓虚拟知识库的全部文档、实体关系与索引状态，并能记住此前工具调用确立的检索上下文。
@@ -249,6 +342,7 @@ tool_simulation_prompt_with_memory = """
 
 4. 仅输出 JSON 格式
    - 必须仅输出一个合法的 JSON 对象，不得在 JSON 之外附加任何解释性文字或旁白。
+   - tool_response 和 new_bg_introduced 两个字段同级
 
 5. 上下文长度控制
    - 单次返回的文档片段总数与单段长度须适中：足够支撑推理，但避免过长。
@@ -257,8 +351,34 @@ tool_simulation_prompt_with_memory = """
    - 在 JSON 的 `new_bg_introduced` 字段中标注本次是否新增永久事实："YES" 或 "NO"。
    - "YES" 代表新增的文档/实体/关系须存档；"NO" 代表仅返回已有知识的检索视图。
 
-请严格按照以下 JSON 格式输出结果：
+### Few-shot 示例（仅供格式与风格参考）
+ ```json
+{{
+   "tool_response": {{
+     "candidates": [
+       {{
+         "doc_id": "doc_001",
+         "text": "梯度下降是一种一阶迭代优化算法，用于寻找可微函数的局部最小值",
+         "score": 0.92
+       }},
+       {{
+         "doc_id": "doc_002",
+         "text": "随机梯度下降（SGD）每次使用一个样本来更新参数",
+         "score": 0.78
+       }},
+       {{
+         "doc_id": "doc_003",
+         "text": "动量法通过积累历史梯度来加速收敛",
+         "score": 0.65
+       }}
+     ],
+     "retrieval_strategy": "dense_vector_similarity"
+   }},
+   "new_bg_introduced": "NO"
+}}
+```
 
+请严格按照以下 JSON 格式输出结果：
 ```json
 {{
   "tool_response": {{
@@ -308,6 +428,85 @@ solve_task_user_prompt = """用户 Query：{task_info}
 
 5. 严格遵守 <policy> 中的工具调用约束，违规将导致任务失败。
 """
+
+plan_trajectory_system_prompt = '''
+You are a planning agent for an Agentic RAG LangGraph pipeline. Create a complete tool-use trajectory before execution. Return only one <plan> XML block containing a JSON array.
+'''
+
+plan_trajectory_user_prompt = """User query:
+{fuzzy_task}
+
+Task background:
+{task_background}
+
+High-level workflow:
+{initial_workflow}
+
+Policy/restrictions:
+{restrict}
+
+Complexity:
+{complexity_summary}
+
+Available tools JSON:
+{available_tools}
+
+Previous evaluation, if any:
+{prior_evaluation}
+
+Plan requirements:
+1. Select only useful tools from the available tool list and avoid distractor tools.
+2. Cover Agentic RAG step2 query optimization, step3 retrieval, step4 post-processing, and step5 sufficiency/relevance evaluation whenever matching tools exist.
+3. Include explicit step dependencies and parameter sources.
+4. If iterative retrieval may be needed, include evaluation-driven follow-up steps within the bounded iteration requirement.
+5. Do not generate the final answer and do not call tools.
+
+Return format:
+<plan>
+[{{"step_id":1,"stage":"query_optimization","tool_name":"ToolName","arguments":{{}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"arg":"input or prior step"}}}}]
+</plan>"""
+
+plan_evaluation_system_prompt = '''
+You are a strict evaluator for a planned Agentic RAG tool trajectory. Evaluate the plan before any execution. Return only one <plan_evaluation> XML block containing a JSON object."
+'''
+
+plan_evaluation_user_prompt = """User query:
+{fuzzy_task}
+
+Policy/restrictions:
+{restrict}
+
+Available tools JSON:
+{available_tools}
+
+Plan JSON:
+{plan_json}
+
+Evaluate these dimensions: tool legality, required parameters, process coverage, dependency correctness, distractor-tool avoidance, iteration design, and policy compliance. Whether valid or invalid, give concrete reasons.
+
+Return format:
+<plan_evaluation>
+{{"is_valid": true, "reasons": ["..."], "issues": [], "revision_suggestions": []}}
+</plan_evaluation>"""
+
+execute_plan_preapproved_prompt = """## Pre-approved execution plan
+The planner and evaluator have already selected the following trajectory. During execution, follow this plan and do not invent extra tool calls unless the plan is exhausted and the accumulated evidence is still insufficient.
+{plan_json}{evidence_section}"""
+
+execute_plan_evidence_section_prompt = """
+
+## Evidence already gathered before this plan revision
+{evidence_json}"""
+
+execute_plan_final_answer_prompt = (
+    "The planned tool trajectory has completed. Use only the accumulated tool responses and "
+    "the task context to produce the final answer. Return the answer wrapped in <answer></answer>. "
+    "If evidence is insufficient, briefly state the missing evidence instead of inventing facts."
+)
+
+planned_tool_message_template = """Executing planned step {step_id}: {purpose}
+Stage: {stage}
+<tool_call>{tool_call}</tool_call>"""
 
 rubric_prompt = """
 你是一名专业的 Agentic RAG 系统评测专家，专攻 RAG 流水线工具调用与检索问答任务的完成质量评估。

@@ -71,7 +71,7 @@ def test_use_label_as_answer_default_true():
     assert use_label_as_answer(_config(False)) is False
 
 
-@patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
+@patch("tracesynth.graph.execute_plan_node.solve_task_by_tools")
 def test_generate_final_answer_injects_label_on_termination(mock_solve):
     mock_solve.return_value = (
         "推理过程...\n<answer>模型自造的错误答案</answer>",
@@ -94,7 +94,7 @@ def test_generate_final_answer_injects_label_on_termination(mock_solve):
     assert match["match_score"] == 1.0
 
 
-@patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
+@patch("tracesynth.graph.execute_plan_node.solve_task_by_tools")
 def test_generate_final_answer_keeps_model_answer_when_flag_disabled(mock_solve):
     model_answer = "推理过程...\n<answer>模型答案</answer>"
     mock_solve.return_value = (model_answer, None)
@@ -105,7 +105,7 @@ def test_generate_final_answer_keeps_model_answer_when_flag_disabled(mock_solve)
     assert extract_predicted_answer(result["solve_history"]) == "模型答案"
 
 
-@patch("tracesynth.graph.graph_virtual_tools.solve_task_by_tools")
+@patch("tracesynth.graph.execute_plan_node.solve_task_by_tools")
 def test_generate_final_answer_falls_back_when_label_empty(mock_solve):
     model_answer = "推理过程...\n<answer>模型答案</answer>"
     mock_solve.return_value = (model_answer, None)
