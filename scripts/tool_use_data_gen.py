@@ -91,8 +91,22 @@ def main():
     config = load_run_config(args.config)
     config = apply_complexity_cli_overrides(config, args)
 
+    if "level" in config.get("logging"):
+        if str(config["logging"]["level"]).lower() == "debug":
+            logging_level = logging.DEBUG
+        elif str(config["logging"]["level"]).lower() == "fatal":
+            logging_level = logging.FATAL
+        elif str(config["logging"]["level"]).lower() == "warning":
+            logging_level = logging.WARNING
+        elif str(config["logging"]["level"]).lower() == "error":
+            logging_level = logging.ERROR
+        else:
+            logging_level = logging.INFO
+    else:
+        logging_level = logging.INFO  # Default logging level
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging_level,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler()
