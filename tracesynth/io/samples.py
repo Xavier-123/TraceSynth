@@ -257,6 +257,16 @@ def build_failure_record(
         record["predicted_answer"] = label_check.get("predicted_answer")
     if extra:
         record.update(extra)
+
+    plan_evaluation = final_state.get("plan_evaluation")
+    if isinstance(plan_evaluation, dict) and plan_evaluation:
+        record.setdefault("plan_evaluation", plan_evaluation)
+        failure_category = plan_evaluation.get("failure_category")
+        if failure_category:
+            record.setdefault("plan_eval_failure_category", failure_category)
+        record.setdefault("plan_revision_count", final_state.get("plan_revision_count"))
+        record.setdefault("max_plan_revisions", final_state.get("max_plan_revisions"))
+
     return record
 
 

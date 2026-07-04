@@ -24,7 +24,15 @@ from tracesynth.functions.call_llms import call_and_parse
 from tracesynth.functions.fuzzy_task import is_supervised_seed
 from tracesynth.functions.plan_trajectory import _build_plan_messages, _parse_plan_response
 from tracesynth.functions.execute_plan import _initial_solve_history_from_plan, _generate_final_answer_from_plan, _format_planned_tool_message
-from tracesynth.functions.evaluate_plan import validate_tool_call, _build_plan_evaluation_messages, _parse_plan_evaluation_response
+from tracesynth.functions.evaluate_plan import (
+    PlanEvaluationStats,
+    annotate_plan_evaluation,
+    basic_plan_validation,
+    build_preflight_evaluation,
+    build_plan_evaluation_messages,
+    parse_plan_evaluation_response,
+)
+from tracesynth.graph.node_utils import validate_tool_call
 from tracesynth.graph.node_utils import (
     AgentState,
     build_failure,
@@ -202,62 +210,58 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
     }
 
 
-def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
-    issues = []
-    tool_names = {tool.get("name") for tool in checked_tools}
-    for index, step in enumerate(plan):
-        tool_name = step.get("tool_name")
-        if tool_name not in tool_names:
-            issues.append(f"plan[{index}] references unknown tool: {tool_name}")
-        tool_call = json.dumps(
-            {"name": tool_name, "arguments": step.get("arguments", {})},
-            ensure_ascii=False,
-        )
-        is_valid, error = validate_tool_call(tool_call, checked_tools)
-        if not is_valid:
-            issues.append(f"plan[{index}] invalid tool call: {error}")
-    return issues
-
-
 def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------EvaluatePlanAgent------------------")
 
     if state["breaked"]:
         return {}
 
-    step_config = create_step_config(config, "EvaluatePlanAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-    evaluation, _ = call_and_parse(
-        cfg,
-        _build_plan_evaluation_messages(state),
-        _parse_plan_evaluation_response,
-        step_name="EvaluatePlanAgent",
-    )
-    if evaluation is None:
-        return build_failure(
-            "EvaluatePlanAgent returned invalid evaluation JSON",
-            **{
-                "plan": state.get("plan", []),
-                "plan_evaluation": state.get("plan_evaluation", {}),
-            },
-        )
-
-    basic_issues = _basic_plan_validation(state.get("plan", []), state["checked_tools"])
-    if basic_issues:
-        # LLM 评估可能漏掉结构性错误，因此再用确定性校验强制拦截未知工具和缺参计划。
-        evaluation["is_valid"] = False
-        evaluation.setdefault("issues", [])
-        evaluation["issues"].extend(basic_issues)
-        evaluation.setdefault("reasons", [])
-        evaluation["reasons"].append("Basic deterministic validation found invalid tool calls.")
-
+    plan = state.get("plan", [])
+    checked_tools = state["checked_tools"]
+    basic_issues = basic_plan_validation(plan, checked_tools)
     max_revisions = get_plan_max_revisions(config)
-    if not evaluation["is_valid"] and int(state.get("plan_revision_count", 0) or 0) >= max_revisions:
-        # 达到最大修订次数后不再继续重规划，避免图在坏计划上无限循环。
+    revision_count = int(state.get("plan_revision_count", 0) or 0)
+
+    if basic_issues:
+        # 结构性错误在 LLM 语义评估前拦截，给 Planner 更精确的缺参/未知工具反馈。
+        evaluation = annotate_plan_evaluation(
+            build_preflight_evaluation(basic_issues),
+            [],
+        )
+    else:
+        step_config = create_step_config(config, "EvaluatePlanAgent")
+        cfg = ModelConfiguration.from_runnable_config(step_config)
+        evaluation, _ = call_and_parse(
+            cfg,
+            build_plan_evaluation_messages(state),
+            parse_plan_evaluation_response,
+            step_name="EvaluatePlanAgent",
+        )
+        if evaluation is None:
+            PlanEvaluationStats.record("parse_failure")
+            return build_failure(
+                "EvaluatePlanAgent returned invalid evaluation JSON",
+                **{
+                    "plan": plan,
+                    "plan_evaluation": {
+                        **(state.get("plan_evaluation", {}) or {}),
+                        "failure_category": "parse_failure",
+                    },
+                },
+            )
+        evaluation = annotate_plan_evaluation(evaluation, [])
+
+    if not evaluation["is_valid"] and revision_count >= max_revisions:
+        evaluation = annotate_plan_evaluation(
+            evaluation,
+            basic_issues,
+            revision_exhausted=True,
+            record_stats=False,
+        )
         return build_failure(
             f"EvaluatePlanAgent rejected plan after max_plan_revisions={max_revisions}",
             **{
-                "plan": state.get("plan", []),
+                "plan": plan,
                 "plan_evaluation": evaluation,
                 "plan_is_valid": False,
                 "max_plan_revisions": max_revisions,
@@ -564,6 +568,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
                 failure_reason=failure_reason,
             )
             save_failure_artifacts(solve_path, final_state)
+        PlanEvaluationStats.log_summary()
         return final_state
 
     predicted_answer = extract_predicted_answer(final_state.get("solve_history"))
@@ -653,6 +658,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         with open(virtual_tool_use_task_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(save_data, ensure_ascii=False) + '\n')
 
+    PlanEvaluationStats.log_summary()
     return final_state
 
 

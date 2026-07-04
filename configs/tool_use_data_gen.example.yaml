@@ -26,14 +26,14 @@ step_models:
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
-    temperature: 0.9
+    temperature: 0.3
     use_thinking: false
   EvaluatePlanAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
-    temperature: 0.9
+    temperature: 0.2
     use_thinking: false
   ExecutePlanAgent:
     name: "qwen3-235b-a22b-instruct-2507"
@@ -68,13 +68,14 @@ processing:
   max_workers: 1
   max_tasks: 2
   retry_failed_tasks: true
+  max_plan_revisions: 5
   max_solver_turns: 18
   graph_recursion_limit: 60
 
 retry:
   api_max_retries: 3
   api_retry_base: 1.0
-  parse_max_retries: 2
+  parse_max_retries: 3
   tool_call_max_retries: 3
 
 logging:

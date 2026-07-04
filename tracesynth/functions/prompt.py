@@ -460,14 +460,15 @@ Plan requirements:
 3. Include explicit step dependencies and parameter sources.
 4. If iterative retrieval may be needed, include evaluation-driven follow-up steps within the bounded iteration requirement.
 5. Do not generate the final answer and do not call tools.
+6. For every plan step, `arguments` MUST include every key listed in that tool's `parameters.required`. If a value comes from the user query or a prior step, use a concrete placeholder string (e.g. "user query from task", "optimized queries from step 1")—never leave `arguments` as {{}} when required fields exist.
 
 Return format:
 <plan>
-[{{"step_id":1,"stage":"query_optimization","tool_name":"ToolName","arguments":{{}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"arg":"input or prior step"}}}}]
+[{{"step_id":1,"stage":"query_optimization","tool_name":"Query_Rewriter","arguments":{{"query":"user query from task"}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"query":"fuzzy_task"}}}}]
 </plan>"""
 
 plan_evaluation_system_prompt = '''
-You are a strict evaluator for a planned Agentic RAG tool trajectory. Evaluate the plan before any execution. Return only one <plan_evaluation> XML block containing a JSON object."
+You are an evaluator for a planned Agentic RAG tool trajectory. Mark a plan invalid only when it would fail execution, violate policy, omit a necessary RAG stage when matching tools exist, or select clearly useless distractor tools. Return only one <plan_evaluation> XML block containing a JSON object.
 '''
 
 plan_evaluation_user_prompt = """User query:
@@ -482,7 +483,20 @@ Available tools JSON:
 Plan JSON:
 {plan_json}
 
-Evaluate these dimensions: tool legality, required parameters, process coverage, dependency correctness, distractor-tool avoidance, iteration design, and policy compliance. Whether valid or invalid, give concrete reasons.
+Evaluate tool legality, required parameters, process coverage, dependency correctness, distractor-tool avoidance, iteration design, and policy compliance.
+
+Mark `is_valid=false` ONLY when:
+- A step references a tool not in the available list, or required arguments are missing
+- The plan cannot cover query optimization, retrieval, post-processing, or evaluation when matching tools exist
+- A distractor tool is chosen instead of a useful tool for the task
+- The plan violates policy/restrictions or cannot be executed as written
+
+Mark `is_valid=true` but still list non-blocking `issues` and `revision_suggestions` when:
+- `depends_on` or `parameter_sources` are incomplete yet every step has executable arguments
+- Iteration design could be improved but the plan is runnable within bounds
+- Minor ordering or documentation gaps remain
+
+Whether valid or invalid, give concrete reasons.
 
 Return format:
 <plan_evaluation>
