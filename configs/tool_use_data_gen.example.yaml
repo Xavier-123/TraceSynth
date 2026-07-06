@@ -1,12 +1,22 @@
 # Different models for different steps
 step_models:
   ToolSetGenAgent:
-    name: "qwen3-235b-a22b-instruct-2507"
-    api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
-    api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
-    max_tokens: 10240
-    temperature: 0.9
-    use_thinking: false
+    name: "deepseek-ai/DeepSeek-V4-Flash"
+    api_base: "DeepSeek_V4_Flash_ADDRESS_bailian"
+    api_key_env: "DeepSeek_V4_Flash_API_KEY_bailian"
+#    max_tokens: 10240
+#    temperature: 0.9
+#    use_thinking: false
+    llm_params:
+      temperature: 0.9
+      max_completion_tokens: 8192
+      reasoning_effort: "xhigh"
+      top_p: 0.95
+      seed: 42
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+
   FuzzyTaskAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"

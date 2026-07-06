@@ -174,20 +174,8 @@ def create_step_config(
     if step_model_config is None:
         raise KeyError(f"No model configuration found for step '{step_name}'")
 
-    step_config = {"configurable": {}}
-    step_config["configurable"]["model_name"] = step_model_config["name"]
-    if "temperature" in step_model_config:
-        step_config["configurable"]["temperature"] = step_model_config["temperature"]
-    if "max_tokens" in step_model_config:
-        step_config["configurable"]["max_tokens"] = step_model_config["max_tokens"]
-    if "use_tools" in step_model_config:
-        step_config["configurable"]["use_tools"] = step_model_config["use_tools"]
-    if "use_thinking" in step_model_config:
-        step_config["configurable"]["use_thinking"] = step_model_config["use_thinking"]
-    if "api_base" in step_model_config:
-        step_config["configurable"]["api_base"] = step_model_config["api_base"]
-    if "api_key_env" in step_model_config:
-        step_config["configurable"]["api_key_env"] = step_model_config["api_key_env"]
+    step_config = {"configurable": dict(step_model_config)}
+    step_config["configurable"]["model_name"] = step_config["configurable"].pop("name")
 
     retry_cfg = base_config["configurable"].get("retry", {})
     # 重试配置是跨 Agent 的运行策略，需要透传到每个步骤的 ModelConfiguration。

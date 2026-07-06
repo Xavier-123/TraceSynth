@@ -116,6 +116,14 @@ class ModelConfiguration(BaseModel):
     max_tokens: int = Field(default=8192, description="模型生成的最大 token 数。")
     use_tools: bool = Field(default=True, description="是否使用工具。")
     use_thinking: bool = Field(default=False, description="是否使用思考模式。")
+    llm_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="OpenAI chat.completions.create 标准参数。",
+    )
+    extra_body: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="OpenAI SDK extra_body，用于兼容接口的非标准参数。",
+    )
     api_max_retries: int = Field(default=3, description="API 瞬时错误最大尝试次数。")
     api_retry_base: float = Field(default=1.0, description="API 重试指数退避基数（秒）。")
     parse_max_retries: int = Field(default=2, description="输出解析失败后的最大重采样次数。")
@@ -126,13 +134,25 @@ class ModelConfiguration(BaseModel):
         """从 RunnableConfig 创建一个 Configuration 实例。"""
         configurable: dict[str, Any] = config.get("configurable", {}) if config else {}
         fields = getattr(cls, "model_fields", cls.__fields__)
+        field_names = set(fields.keys())
 
-        raw_values: Dict[str, Any] = {
-            name: configurable.get(name, field.default)
-            for name, field in fields.items()
+        raw_values: Dict[str, Any] = {name: configurable[name] for name in field_names if name in configurable}
+        extra_llm_params: Dict[str, Any] = {
+            name: value
+            for name, value in configurable.items()
+            if name not in field_names and value is not None
         }
 
         values = {k: v for k, v in raw_values.items() if v is not None}
+        llm_params = values.get("llm_params") or {}
+        if not isinstance(llm_params, dict):
+            raise ValueError("llm_params must be a mapping")
+        values["llm_params"] = {**extra_llm_params, **llm_params}
+
+        extra_body = values.get("extra_body") or {}
+        if not isinstance(extra_body, dict):
+            raise ValueError("extra_body must be a mapping")
+        values["extra_body"] = extra_body
 
         model_name = values.get("model_name")
 

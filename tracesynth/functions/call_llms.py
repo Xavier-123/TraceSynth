@@ -54,55 +54,96 @@ def _sleep_with_backoff(attempt: int, base: float) -> None:
     time.sleep(delay)
 
 
+def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _thinking_extra_body(api_base: Optional[str], use_thinking: bool) -> Dict[str, Any]:
+    if api_base in ["https://apihub.agnes-ai.com/v1", "https://api-inference.modelscope.cn/v1"]:
+        return {"enable_thinking": use_thinking}
+    if api_base in ["https://api.siliconflow.cn/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"]:
+        return {"chat_template_kwargs": {"enable_thinking": use_thinking}}
+    return {}
+
+
+def _build_chat_completion_request(
+    *,
+    api_base: Optional[str],
+    model_name: str,
+    messages: List[Dict[str, str]],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    use_thinking: bool,
+    llm_params: Optional[Dict[str, Any]],
+    extra_body: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    params = dict(llm_params or {})
+    reserved_keys = {"model", "messages"} & params.keys()
+    if reserved_keys:
+        raise ValueError(f"llm_params cannot override reserved request keys: {sorted(reserved_keys)}")
+
+    if temperature is not None and "temperature" not in params:
+        params["temperature"] = temperature
+    if max_tokens is not None and "max_completion_tokens" not in params and "max_tokens" not in params:
+        params["max_completion_tokens"] = max_tokens
+
+    nested_extra_body = params.pop("extra_body", None)
+    if nested_extra_body is not None and not isinstance(nested_extra_body, dict):
+        raise ValueError("llm_params.extra_body must be a mapping")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise ValueError("extra_body must be a mapping")
+
+    merged_extra_body = _thinking_extra_body(api_base, use_thinking)
+    if nested_extra_body:
+        merged_extra_body = _merge_dicts(merged_extra_body, nested_extra_body)
+    if extra_body:
+        merged_extra_body = _merge_dicts(merged_extra_body, extra_body)
+    if merged_extra_body:
+        params["extra_body"] = merged_extra_body
+
+    return {
+        "model": model_name,
+        "messages": messages,
+        **params,
+    }
+
+
 def create_chat_completion_with_retry(
     *,
     api_base: Optional[str],
     api_key: Optional[str],
     model_name: str,
     messages: List[Dict[str, str]],
-    max_tokens: int,
-    temperature: float,
+    max_tokens: Optional[int],
+    temperature: Optional[float],
     use_thinking: bool = False,
     api_max_retries: int = 3,
     api_retry_base: float = 1.0,
+    llm_params: Optional[Dict[str, Any]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> str:
     client = OpenAI(api_key=api_key, base_url=api_base, max_retries=0)
     last_exc: Optional[Exception] = None
+    request = _build_chat_completion_request(
+        api_base=api_base,
+        model_name=model_name,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        use_thinking=use_thinking,
+        llm_params=llm_params,
+        extra_body=extra_body,
+    )
 
     for attempt in range(api_max_retries):
         try:
-            if api_base in ["https://apihub.agnes-ai.com/v1", "https://api-inference.modelscope.cn/v1"]:
-                # Agnes/ModelScope 使用 enable_thinking 与 max_completion_tokens 控制思考和长度。
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_completion_tokens=max_tokens,
-                    extra_body={
-                        "enable_thinking": use_thinking,
-                    },
-                )
-            elif api_base in ["https://api.siliconflow.cn/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"]:
-                # SiliconFlow/DashScope 把思考开关放在 chat_template_kwargs 中。
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    max_completion_tokens=max_tokens,
-                    temperature=temperature,
-                    extra_body={
-                        "chat_template_kwargs": {"enable_thinking": use_thinking},
-                    },
-                )
-            else:
-                logger.debug("Using default API base!!!")
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    max_completion_tokens=max_tokens,
-                    temperature=temperature,
-                    extra_body={
-                    },
-                )
+            response = client.chat.completions.create(**request)
 
             return response.choices[0].message.content or ""
         except Exception as exc:
@@ -129,11 +170,13 @@ def call_llm_messages(
     api_base: Optional[str],
     api_key: Optional[str],
     model_name: str,
-    max_tokens: int,
-    temperature: float,
+    max_tokens: Optional[int],
+    temperature: Optional[float],
     use_thinking: bool = False,
     api_max_retries: int = 3,
     api_retry_base: float = 1.0,
+    llm_params: Optional[Dict[str, Any]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     content = create_chat_completion_with_retry(
         api_base=api_base,
@@ -145,6 +188,8 @@ def call_llm_messages(
         use_thinking=use_thinking,
         api_max_retries=api_max_retries,
         api_retry_base=api_retry_base,
+        llm_params=llm_params,
+        extra_body=extra_body,
     )
     updated_messages = list(messages)
     updated_messages.append({"role": "assistant", "content": content})
@@ -157,11 +202,13 @@ def call_llm_api(
     api_base: Optional[str],
     api_key: Optional[str],
     model_name: str,
-    max_tokens: int,
-    temperature: float,
+    max_tokens: Optional[int],
+    temperature: Optional[float],
     use_thinking: bool = False,
     api_max_retries: int = 3,
     api_retry_base: float = 1.0,
+    llm_params: Optional[Dict[str, Any]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ):
     messages = [
         {"role": "system", "content": system_prompt},
@@ -177,6 +224,8 @@ def call_llm_api(
         use_thinking=use_thinking,
         api_max_retries=api_max_retries,
         api_retry_base=api_retry_base,
+        llm_params=llm_params,
+        extra_body=extra_body,
     )
 
 
@@ -209,6 +258,8 @@ def call_and_parse(
                 use_thinking=cfg.use_thinking,
                 api_max_retries=getattr(cfg, "api_max_retries", 3),
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
+                llm_params=getattr(cfg, "llm_params", None),
+                extra_body=getattr(cfg, "extra_body", None),
             )
             last_result_messages = result_messages
         except Exception as exc:
