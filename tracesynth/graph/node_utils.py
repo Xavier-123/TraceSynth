@@ -162,11 +162,11 @@ def create_step_config(
 ) -> RunnableConfig:
     """Create a new configuration for a specific step with its designated model."""
     step_models = base_config["configurable"]["step_models"]
-    # 规划/评估/执行 Agent 优先共用求解模型作为兜底，其他节点优先找自身配置再走通用回退。
+    # 规划/评估/执行 Agent 优先共用求解模型作为兜底，其他节点走通用回退。
     fallback_names = (
-        ("FallbackModel", "Fallback", "SolveAgent")
+        ("SolveAgent", "FallbackModel", "Fallback")
         if step_name in {"PlanTrajectoryAgent", "EvaluatePlanAgent", "ExecutePlanAgent"}
-        else (step_name, "FallbackModel", "Fallback")
+        else ("FallbackModel", "Fallback")
     )
     step_model_config = step_models.get(step_name)
     for fallback_name in fallback_names:
@@ -273,3 +273,9 @@ def use_label_as_answer(config: RunnableConfig) -> bool:
 
 def get_synthesis_complexity(config: RunnableConfig) -> SynthesisComplexity:
     return SynthesisComplexity.from_run_config(config.get("configurable", {}))
+
+
+def should_paraphrase_question(config: RunnableConfig) -> bool:
+    configurable = config.get("configurable", {}) if config else {}
+    synthesis_cfg = configurable.get("synthesis") or {}
+    return bool(synthesis_cfg.get("paraphrase_supervised_question", True))

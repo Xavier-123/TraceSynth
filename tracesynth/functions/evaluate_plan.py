@@ -89,6 +89,19 @@ def _build_revision_suggestions_from_issues(issues: List[str]) -> List[str]:
     return suggestions
 
 
+def _validate_dependencies(plan: List[Dict[str, Any]]) -> List[str]:
+    issues: List[str] = []
+    step_ids = {step.get("step_id", idx + 1) for idx, step in enumerate(plan)}
+    for index, step in enumerate(plan):
+        current_id = step.get("step_id", index + 1)
+        for dep in step.get("depends_on") or []:
+            if dep not in step_ids:
+                issues.append(f"plan[{index}] depends_on references missing step_id: {dep}")
+            elif dep >= current_id:
+                issues.append(f"plan[{index}] depends_on references a non-earlier step_id: {dep}")
+    return issues
+
+
 def basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
     issues: List[str] = []
     tool_names = {tool.get("name") for tool in checked_tools}
@@ -96,6 +109,7 @@ def basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[s
         tool_name = step.get("tool_name")
         if tool_name not in tool_names:
             issues.append(f"plan[{index}] references unknown tool: {tool_name}")
+            continue
         tool_call = json.dumps(
             {"name": tool_name, "arguments": step.get("arguments", {})},
             ensure_ascii=False,
@@ -103,6 +117,7 @@ def basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[s
         is_valid, error = validate_tool_call(tool_call, checked_tools)
         if not is_valid:
             issues.append(f"plan[{index}] invalid tool call: {error}")
+    issues.extend(_validate_dependencies(plan))
     return issues
 
 

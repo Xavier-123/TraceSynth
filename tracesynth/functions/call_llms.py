@@ -77,9 +77,9 @@ def create_chat_completion_with_retry(
                     model=model_name,
                     messages=messages,
                     temperature=temperature,
+                    max_completion_tokens=max_tokens,
                     extra_body={
                         "enable_thinking": use_thinking,
-                        "max_completion_tokens": max_tokens,
                     },
                 )
             elif api_base in ["https://api.siliconflow.cn/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"]:
@@ -87,6 +87,7 @@ def create_chat_completion_with_retry(
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
+                    max_completion_tokens=max_tokens,
                     temperature=temperature,
                     extra_body={
                         "chat_template_kwargs": {"enable_thinking": use_thinking},
@@ -97,6 +98,7 @@ def create_chat_completion_with_retry(
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
+                    max_completion_tokens=max_tokens,
                     temperature=temperature,
                     extra_body={
                     },

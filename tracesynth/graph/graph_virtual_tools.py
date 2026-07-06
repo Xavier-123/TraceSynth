@@ -32,7 +32,6 @@ from tracesynth.functions.evaluate_plan import (
     build_plan_evaluation_messages,
     parse_plan_evaluation_response,
 )
-from tracesynth.graph.node_utils import validate_tool_call
 from tracesynth.graph.node_utils import (
     AgentState,
     build_failure,
@@ -44,6 +43,8 @@ from tracesynth.graph.node_utils import (
     get_graph_recursion_limit,
     is_graph_recursion_error,
     is_successful_final_state,
+    should_paraphrase_question,
+    validate_tool_call,
 )
 
 # 多线程批量生成时会并发写 JSONL，统一用锁保护追加写入和失败快照。
@@ -92,45 +93,38 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
         return {}
 
     seed_info = state["seed_info"]
-    if is_supervised_seed(seed_info):
-        # 监督数据已有真实问题，不能再让 LLM 改写问题；这里只补虚拟交互所需背景。
+    step_config = create_step_config(config, "FuzzyTaskAgent")
+    cfg = ModelConfiguration.from_runnable_config(step_config)
+    complexity = get_synthesis_complexity(config)
+    initial_toolset_create = state["initial_toolset_create"]
+
+    supervised = is_supervised_seed(seed_info)
+    generated_background = ""
+
+    if supervised and not should_paraphrase_question(config):
         fuzzy_task = seed_info["question"]
-        task_background_parts = []
-        if seed_info.get("context"):
-            task_background_parts.append(seed_info["context"])
-        step_config = create_step_config(config, "FuzzyTaskAgent")
-        cfg = ModelConfiguration.from_runnable_config(step_config)
-        initial_toolset_create = state["initial_toolset_create"]
-        complexity = get_synthesis_complexity(config)
         _, generated_background = generate_fuzzy_task(
             cfg=cfg, initial_task_info=initial_toolset_create, complexity=complexity,
         )
-        if is_non_empty_text(generated_background):
-            task_background_parts.append(generated_background)
-        # 背景由原始 context 和 LLM 生成背景拼接，既保留证据又补足场景设定。
-        task_background = "\n\n".join(task_background_parts).strip()
-        if not is_non_empty_text(task_background):
-            return build_failure(
-                "FuzzyTaskAgent did not return task/background in supervised mode",
-                **{
-                    "fuzzy_task": fuzzy_task,
-                    "task_background": task_background,
-                },
-            )
-        return {
-            "fuzzy_task": fuzzy_task,
-            "task_background": task_background,
-        }
+    else:
+        fuzzy_task, generated_background = generate_fuzzy_task(
+            cfg=cfg, initial_task_info=initial_toolset_create, complexity=complexity,
+        )
+        if supervised and fuzzy_task and seed_info.get("label"):
+            label_text = str(seed_info["label"]).strip()
+            if label_text and label_text.lower() in fuzzy_task.lower():
+                logger.warning(
+                    "FuzzyTaskAgent leaked label into paraphrased task; falling back to raw question"
+                )
+                fuzzy_task = seed_info["question"]
 
-    # Create step-specific configuration
-    step_config = create_step_config(config, "FuzzyTaskAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
+    task_background_parts = []
+    if supervised and seed_info.get("context"):
+        task_background_parts.append(seed_info["context"])
+    if is_non_empty_text(generated_background):
+        task_background_parts.append(generated_background)
+    task_background = "\n\n".join(task_background_parts).strip()
 
-    initial_toolset_create = state["initial_toolset_create"]
-    complexity = get_synthesis_complexity(config)
-    fuzzy_task, task_background = generate_fuzzy_task(
-        cfg=cfg, initial_task_info=initial_toolset_create, complexity=complexity,
-    )
     if not all(is_non_empty_text(value) for value in (fuzzy_task, task_background)):
         return build_failure(
             "FuzzyTaskAgent did not return task/background",
@@ -142,7 +136,7 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
 
     return {
         "fuzzy_task": fuzzy_task,
-        "task_background": task_background
+        "task_background": task_background,
     }
 
 
@@ -239,17 +233,24 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
         )
         if evaluation is None:
             PlanEvaluationStats.record("parse_failure")
-            return build_failure(
-                "EvaluatePlanAgent returned invalid evaluation JSON",
-                **{
-                    "plan": plan,
-                    "plan_evaluation": {
-                        **(state.get("plan_evaluation", {}) or {}),
-                        "failure_category": "parse_failure",
-                    },
+            evaluation = annotate_plan_evaluation(
+                {
+                    "is_valid": False,
+                    "reasons": [
+                        "EvaluatePlanAgent output could not be parsed after retries; "
+                        "treating as an inconclusive evaluation rather than a hard failure."
+                    ],
+                    "issues": [],
+                    "revision_suggestions": [
+                        "Re-run plan evaluation; simplify the plan if malformed evaluator output persists."
+                    ],
                 },
+                [],
+                parse_failed=True,
+                record_stats=False,
             )
-        evaluation = annotate_plan_evaluation(evaluation, [])
+        else:
+            evaluation = annotate_plan_evaluation(evaluation, [])
 
     if not evaluation["is_valid"] and revision_count >= max_revisions:
         evaluation = annotate_plan_evaluation(
@@ -302,7 +303,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     if not plan:
         return build_failure("ExecutePlanAgent cannot run without a non-empty plan")
 
-    solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
+    solve_history = list(state.get("solve_history") or _initial_solve_history_from_plan(state, config))
     current_plan_step = int(state.get("current_plan_step", 0) or 0)
     if current_plan_step >= len(plan):
         # 所有计划步骤完成后进入最终回答；若证据仍不足，会返回 Need replan 触发重规划。
@@ -317,20 +318,40 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     tool_call = json.dumps(tool_call_obj, ensure_ascii=False)
     is_valid, error = validate_tool_call(tool_call, state["checked_tools"])
     if not is_valid:
-        return build_failure(
-            error or "Invalid planned tool_call",
-            **{
-                "plan": plan,
-                "current_plan_step": current_plan_step,
-                "solve_history": solve_history,
-                "tool_call_history": state.get("tool_call_history", []),
-            },
-        )
+        max_revisions = get_plan_max_revisions(config)
+        revision_count = int(state.get("plan_revision_count", 0) or 0)
+        plan_evaluation = {
+            "is_valid": False,
+            "reasons": ["A previously approved plan step became invalid at execution time."],
+            "issues": [error or "Invalid planned tool_call"],
+            "revision_suggestions": [
+                "Regenerate the plan ensuring every step's arguments stay valid."
+            ],
+        }
+        if revision_count >= max_revisions:
+            return build_failure(
+                error or "Invalid planned tool_call",
+                **{
+                    "plan": plan,
+                    "current_plan_step": current_plan_step,
+                    "solve_history": solve_history,
+                    "tool_call_history": state.get("tool_call_history", []),
+                    "plan_evaluation": plan_evaluation,
+                },
+            )
+        return {
+            "current_tool_call": None,
+            "solve_history": solve_history,
+            "task_finished": "Need replan",
+            "solver_turn_count": solver_turn_count,
+            "plan_evaluation": plan_evaluation,
+            "plan_is_valid": False,
+        }
 
-    solve_history.append({
+    solve_history = solve_history + [{
         "role": "assistant",
         "content": _format_planned_tool_message(step, tool_call),
-    })
+    }]
 
     return {
         "current_tool_call": tool_call,
@@ -351,7 +372,6 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     tool_call = state["current_tool_call"]
     tools_description = state["checked_tools"]
     tool_call_history = state["tool_call_history"]
-    solve_history = state["solve_history"]
 
     tool_response, new_bg_introduced = mock_tool_response(
         cfg,
@@ -366,42 +386,38 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
         return build_failure(
             "MockToolAgent returned no tool response",
             **{
-                "solve_history": solve_history,
+                "solve_history": state["solve_history"],
                 "tool_call_history": tool_call_history,
                 "current_tool_call": tool_call,
             },
         )
 
     tool_response_message = {"role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"}
-
-    solve_history.append(tool_response_message)
+    new_solve_history = state["solve_history"] + [tool_response_message]
+    new_tool_call_history = tool_call_history
     if new_bg_introduced:
-        tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")
+        new_tool_call_history = tool_call_history + [f"Query:\n{tool_call}, Response:\n{tool_response}"]
 
     update = {
-        "tool_call_history": tool_call_history,
-        "solve_history": solve_history
+        "tool_call_history": new_tool_call_history,
+        "solve_history": new_solve_history,
     }
     if state.get("plan"):
         # Plan-Execute 模式下记录执行过的计划步和工具返回，供终答、重规划和落盘审计使用。
         current_plan_step = int(state.get("current_plan_step", 0) or 0)
         plan = state.get("plan", [])
-        executed_steps = list(state.get("executed_steps") or [])
-        step_results = list(state.get("step_results") or [])
         if 0 <= current_plan_step < len(plan):
             planned_step = plan[current_plan_step]
-            executed_steps.append(planned_step)
-            step_results.append({
-                "step_id": planned_step.get("step_id", current_plan_step + 1),
-                "tool_call": tool_call,
-                "tool_response": tool_response,
-                "new_bg_introduced": bool(new_bg_introduced),
+            update.update({
+                "executed_steps": (state.get("executed_steps") or []) + [planned_step],
+                "step_results": (state.get("step_results") or []) + [{
+                    "step_id": planned_step.get("step_id", current_plan_step + 1),
+                    "tool_call": tool_call,
+                    "tool_response": tool_response,
+                    "new_bg_introduced": bool(new_bg_introduced),
+                }],
+                "current_plan_step": current_plan_step + 1,
             })
-        update.update({
-            "executed_steps": executed_steps,
-            "step_results": step_results,
-            "current_plan_step": current_plan_step + 1,
-        })
 
     return update
 

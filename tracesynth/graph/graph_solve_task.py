@@ -18,11 +18,14 @@ from tracesynth.graph.node_utils import (
     create_step_config,
     get_graph_recursion_limit,
     get_solver_max_turns,
+    get_tool_call_max_retries,
     is_graph_recursion_error,
     validate_tool_call,
 )
 
 log_file_lock = threading.Lock()
+
+
 def solve_task_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
         return {
@@ -84,40 +87,56 @@ For each function call, return a json object with function name and arguments wi
             {"role": "user", "content": prompt}
         ]
     else:
-        solve_history = state["solve_history"]
+        solve_history = list(state["solve_history"])
 
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
-    one_step_think_and_tool_call_message = {
-        "role": "assistant", "content": one_step_think_and_tool_call
-    }
-    solve_history.append(one_step_think_and_tool_call_message)
-    
+    solve_history = solve_history + [{"role": "assistant", "content": one_step_think_and_tool_call}]
+
     if "<answer>" not in one_step_think_and_tool_call:
         if tool_call_info is None:
             # 没有答案也没有工具调用，说明 Solver 需要向模拟用户追问缺失信息。
             task_finished = "Transfer to user"
+            retry_count = 0
         else:
-            # 工具调用先做统一合法性校验，非法调用直接中断本次复采样。
             is_valid, error = validate_tool_call(tool_call_info, state["checked_tools"])
             if not is_valid:
+                retry_count = int(state.get("tool_call_retry_count", 0) or 0) + 1
+                if retry_count <= get_tool_call_max_retries(config):
+                    solve_history = solve_history + [{
+                        "role": "user",
+                        "content": (
+                            f"Your <tool_call> was invalid: {error}. "
+                            "Please check the tool name and required arguments, then try again."
+                        ),
+                    }]
+                    return {
+                        "current_tool_call": None,
+                        "solve_history": solve_history,
+                        "task_finished": "Retry tool call",
+                        "tool_call_retry_count": retry_count,
+                        "solver_turn_count": solver_turn_count,
+                    }
                 return build_failure(
-                    error or "Invalid tool_call",
+                    error or "Invalid tool_call after max retries",
                     current_tool_call=tool_call_info,
                     solve_history=solve_history,
                     tool_call_history=state.get("tool_call_history", []),
                     solver_turn_count=solver_turn_count,
                 )
             task_finished = "Tool call"
+            retry_count = 0
     else:
         task_finished = "Terminated"
-    
+        retry_count = 0
 
     return {
         "current_tool_call": tool_call_info,
         "solve_history": solve_history,
         "task_finished": task_finished,
+        "tool_call_retry_count": retry_count,
         "solver_turn_count": solver_turn_count,
     }
+
 
 def mock_tools_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
@@ -129,13 +148,12 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     tool_call = state["current_tool_call"]
     tools_description = state["checked_tools"]
     tool_call_history = state["tool_call_history"]
-    solve_history = state["solve_history"]
 
     tool_response, new_bg_introduced = mock_tool_response(cfg, tool_call, tools_description, tool_call_history)
     if tool_response is None:
         return build_failure(
             "MockToolAgent returned no tool response",
-            solve_history=solve_history,
+            solve_history=state["solve_history"],
             tool_call_history=tool_call_history,
             current_tool_call=tool_call,
         )
@@ -143,15 +161,16 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     tool_response_message = {
         "role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"
     }
-    solve_history.append(tool_response_message)
+    new_solve_history = state["solve_history"] + [tool_response_message]
+    new_tool_call_history = tool_call_history
     if new_bg_introduced:
-        # 只有工具返回引入新背景时才写入记忆，避免无信息调用污染虚拟世界状态。
-        tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")
-    
+        new_tool_call_history = tool_call_history + [f"Query:\n{tool_call}, Response:\n{tool_response}"]
+
     return {
-        "tool_call_history": tool_call_history,
-        "solve_history": solve_history
+        "tool_call_history": new_tool_call_history,
+        "solve_history": new_solve_history,
     }
+
 
 def mock_user_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
@@ -167,14 +186,14 @@ def mock_user_node(state: AgentState, config: RunnableConfig):
     fuzzy_task = state["fuzzy_task"]
     task_background = state["task_background"]
     restrict = state["restrict"]
-    solve_history = state["solve_history"]
 
-    user_response = mock_user_response(cfg, fuzzy_task, task_background, restrict, solve_history)
-    solve_history.append({"role": "user", "content": user_response})
+    user_response = mock_user_response(cfg, fuzzy_task, task_background, restrict, state["solve_history"])
+    new_solve_history = state["solve_history"] + [{"role": "user", "content": user_response}]
 
     return {
-        "solve_history": solve_history
+        "solve_history": new_solve_history,
     }
+
 
 def should_call_tool(state: AgentState):
     # task_finished 是图路由信号：终答结束、工具调用进 MockTools，否则交给 MockUser 补信息。
@@ -182,8 +201,11 @@ def should_call_tool(state: AgentState):
         return "end"
     elif state["task_finished"] == "Tool call":
         return "tool_call"
+    elif state["task_finished"] == "Retry tool call":
+        return "retry"
     else:
         return "user"
+
 
 # Build the graph
 builder = StateGraph(AgentState, config_schema=RunnableConfig)
@@ -195,7 +217,7 @@ builder.set_entry_point("reason_and_act")
 builder.add_conditional_edges(
     "reason_and_act",
     should_call_tool,
-    {"tool_call": "mock_tools", "user": "mock_user", "end": END}
+    {"tool_call": "mock_tools", "user": "mock_user", "retry": "reason_and_act", "end": END}
 )
 builder.add_edge("mock_tools", "reason_and_act")
 builder.add_edge("mock_user", "reason_and_act")
@@ -285,7 +307,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         # Save basic task data
         with open(already_processed_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps({"id": seed_info['id']}, ensure_ascii=False) + '\n')
-    
+
     return final_state
 
 
@@ -300,7 +322,7 @@ if __name__ == "__main__":
     for task in tasks:
         with open(f"output/solve_tool_use/{task['id']}/tool_call_history.json", 'r', encoding='utf-8') as f:
             tool_call_history = json.load(f)
-        
+
         new_task = {
             "id": task["id"],
             "fuzzy_task": task["fuzzy_task"],
@@ -308,4 +330,3 @@ if __name__ == "__main__":
             "tool_call_history": tool_call_history
         }
         run_agent(new_task, run_config=agent_config)
-

@@ -25,6 +25,7 @@ from tracesynth.graph.node_utils import (
     normalize_tool_for_solver,
     use_label_as_answer,
 )
+from tracesynth.io import check_label_match
 
 logger = logging.getLogger(__name__)
 
@@ -74,26 +75,60 @@ def _format_planned_tool_message(step: Dict[str, Any], tool_call: str) -> str:
     )
 
 
+def _insufficient_evidence_outcome(
+    state: AgentState,
+    config: RunnableConfig,
+    solve_history: List[Dict[str, Any]],
+    solver_turn_count: int,
+    *,
+    extra_reason: str = "",
+) -> Dict[str, Any]:
+    """证据不足时：未超修订上限则重规划，否则判定失败。"""
+    max_revisions = get_plan_max_revisions(config)
+    revision_count = int(state.get("plan_revision_count", 0) or 0)
+    reasons = ["The completed plan did not provide enough evidence for the final answer."]
+    if extra_reason:
+        reasons.append(extra_reason)
+    plan_evaluation = {
+        "is_valid": False,
+        "reasons": reasons,
+        "issues": [
+            "Final Response requested an additional tool call after executing all planned steps."
+        ],
+        "revision_suggestions": [
+            "Revise the plan to include the missing evidence-gathering step before final answering."
+        ],
+    }
+    if revision_count >= max_revisions:
+        return build_failure(
+            "plan exhausted but evidence still insufficient after max revisions",
+            **{
+                "solve_history": solve_history,
+                "tool_call_history": state.get("tool_call_history", []),
+                "solver_turn_count": solver_turn_count,
+                "plan_revision_count": revision_count,
+                "max_plan_revisions": max_revisions,
+                "plan_evaluation": plan_evaluation,
+                "plan_is_valid": False,
+            },
+        )
+    return {
+        "current_tool_call": None,
+        "solve_history": solve_history,
+        "task_finished": "Need replan",
+        "solver_turn_count": solver_turn_count,
+        "plan_evaluation": plan_evaluation,
+        "plan_is_valid": False,
+    }
+
+
 def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, solver_turn_count: int) -> Dict[str, Any]:
     step_config = create_step_config(config, "ExecutePlanAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
-    solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
+    solve_history = list(state.get("solve_history") or _initial_solve_history_from_plan(state, config))
+    solve_history = solve_history + [{"role": "user", "content": execute_plan_final_answer_prompt}]
 
-    solve_history.append({"role": "user", "content": execute_plan_final_answer_prompt})
-    if use_label_as_answer(config):
-        label = (state["seed_info"].get("label") or "").strip()
-        if label:
-            solve_history.append({
-                "role": "assistant",
-                "content": f"<answer>{label}</answer>",
-            })
-            return {
-                "current_tool_call": None,
-                "solve_history": solve_history,
-                "task_finished": "Terminated",
-                "solver_turn_count": solver_turn_count,
-            }
-
+    # 先让模型基于已收集证据自行判断能否给出终答，不再提前用金标短路。
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
     if not is_non_empty_text(one_step_think_and_tool_call):
         return build_failure(
@@ -105,16 +140,31 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
             },
         )
 
-    solve_history.append({"role": "assistant", "content": one_step_think_and_tool_call})
-    if re.search(r"<answer>.*?</answer>", one_step_think_and_tool_call, re.DOTALL | re.IGNORECASE):
+    solve_history = solve_history + [{"role": "assistant", "content": one_step_think_and_tool_call}]
+    answer_match = re.search(
+        r"<answer>(.*?)</answer>",
+        one_step_think_and_tool_call,
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    if answer_match:
+        model_answer = answer_match.group(1).strip()
         if use_label_as_answer(config):
-            # 合成数据默认用金标覆盖模型终答，保证输出答案与监督标签一致。
             label = (state["seed_info"].get("label") or "").strip()
             if label:
-                solve_history[-1] = {
-                    "role": "assistant",
-                    "content": f"<answer>{label}</answer>",
-                }
+                match_result = check_label_match(model_answer, label)
+                if match_result["label_match_status"] != "match":
+                    return _insufficient_evidence_outcome(
+                        state,
+                        config,
+                        solve_history,
+                        solver_turn_count,
+                        extra_reason=(
+                            f"Model's own final answer ('{model_answer}') does not match "
+                            f"the supervised label; treating as insufficient/incorrect evidence chain."
+                        ),
+                    )
+                solve_history[-1] = {"role": "assistant", "content": f"<answer>{label}</answer>"}
         return {
             "current_tool_call": None,
             "solve_history": solve_history,
@@ -123,52 +173,7 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         }
 
     if tool_call_info is not None:
-        # 计划执行完后仍请求工具，说明现有证据不足；未达上限时触发重规划补检。
-        max_revisions = get_plan_max_revisions(config)
-        revision_count = int(state.get("plan_revision_count", 0) or 0)
-        if revision_count >= max_revisions:
-            return build_failure(
-                "plan exhausted but evidence still insufficient after max revisions",
-                **{
-                    "solve_history": solve_history,
-                    "tool_call_history": state.get("tool_call_history", []),
-                    "solver_turn_count": solver_turn_count,
-                    "plan_revision_count": revision_count,
-                    "max_plan_revisions": max_revisions,
-                    "plan_evaluation": {
-                        "is_valid": False,
-                        "reasons": [
-                            "The completed plan did not provide enough evidence for the final answer."
-                        ],
-                        "issues": [
-                            "Final Response requested an additional tool call after executing all planned steps."
-                        ],
-                        "revision_suggestions": [
-                            "Revise the plan to include the missing evidence-gathering step before final answering."
-                        ],
-                    },
-                    "plan_is_valid": False,
-                },
-            )
-        return {
-            "current_tool_call": None,
-            "solve_history": solve_history,
-            "task_finished": "Need replan",
-            "solver_turn_count": solver_turn_count,
-            "plan_evaluation": {
-                "is_valid": False,
-                "reasons": [
-                    "The completed plan did not provide enough evidence for the final answer."
-                ],
-                "issues": [
-                    "Final Response requested an additional tool call after executing all planned steps."
-                ],
-                "revision_suggestions": [
-                    "Revise the plan to include the missing evidence-gathering step before final answering."
-                ],
-            },
-            "plan_is_valid": False,
-        }
+        return _insufficient_evidence_outcome(state, config, solve_history, solver_turn_count)
 
     return build_failure(
         "Final Response completed planned execution but did not produce <answer>",
