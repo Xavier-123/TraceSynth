@@ -8,40 +8,84 @@ from tracesynth.configuration import SynthesisComplexity, parse_range
 
 
 class AgentState(TypedDict):
-    # 原始种子与中断标记，所有图节点都会依赖这两个字段判断是否继续推进。
+    # 当前样本的原始输入信息；通常包含 id、question、label、context/background，
+    # 是工具集生成、监督答案校验、MockTool 构造虚拟知识库的根数据。
     seed_info: Dict[str, Any]
+
+    # 图级中断标记；任一节点调用 build_failure 后置为 True，
+    # 后续节点/路由据此停止继续生成并进入失败落盘流程。
     breaked: bool
 
-    # ToolSetGenAgent 产出的初始任务、工具、工作流和约束，供后续模糊化与规划使用。
+    # ToolSetGenAgent 的完整原始输出，去除了 reasoning 后保留 task/tools/workflow/restriction 等区块。
     initial_toolset_create: str
+
+    # ToolSetGenAgent 设计的初始虚拟工具描述文本；会交给 ToolCheckAgent 校验并转成可执行 schema。
     initial_tools: str
+
+    # ToolSetGenAgent 从种子背景中抽象出的初始任务描述；主要用于审计和调试，后续求解使用 fuzzy_task。
     initial_task: str
+
+    # ToolSetGenAgent 设计的高层 RAG 工作流说明；会注入 Planner，帮助计划对齐 step2~step5。
     initial_workflow: str
+
+    # 对 Solver/工具调用的策略约束，例如必须澄清缺失参数、不得臆造信息等。
     restrict: str
 
-    # FuzzyTaskAgent 与 ToolCheckAgent 产物：最终给 Solver 的模糊任务、可用工具和背景信息。
+    # FuzzyTaskAgent 产出的用户侧任务描述；这是 Solver 实际看到并尝试完成的问题。
     fuzzy_task: str
+
+    # ToolCheckAgent 审核后的工具 schema 列表；Planner 和 Solver 只能调用这里列出的工具。
     checked_tools: List[Dict[str, Any]]
+
+    # FuzzyTaskAgent 产出的背景资料；不一定直接暴露给 Solver，但供 MockUser/MockTool 模拟交互与知识库状态。
     task_background: str
 
-    # Plan-Execute 流水线状态：计划、评估结果、当前执行进度和每步工具返回。
+    # PlanTrajectoryAgent 生成的计划步骤列表；每步通常包含 step_id、stage、purpose、tool_name、arguments。
     plan: List[Dict[str, Any]]
+
+    # EvaluatePlanAgent 对当前 plan 的结构和语义评估结果；重规划时会作为反馈注入下一轮 Planner。
     plan_evaluation: Dict[str, Any]
+
+    # 当前 plan 是否已通过评估；路由函数据此决定进入 execute_plan 还是回到 plan_trajectory。
     plan_is_valid: bool
+
+    # 已生成/修订 plan 的次数；每次进入 PlanTrajectoryAgent 都递增，用于限制无限重规划。
     plan_revision_count: int
+
+    # 允许的最大 plan 修订次数；来自配置，超过后若仍无有效计划则终止本样本。
     max_plan_revisions: int
+
+    # Plan-Execute 模式下当前准备执行的 plan 下标；MockTool 返回后递增。
     current_plan_step: int
+
+    # 已经执行过的计划步骤快照；最终 more_info 和失败诊断会用它还原执行进度。
     executed_steps: List[Dict[str, Any]]
+
+    # 每个已执行步骤对应的工具调用、工具返回和是否引入新背景信息。
     step_results: List[Dict[str, Any]]
 
-    # Reason-Act / ExecutePlan 共用的求解轨迹与工具调用记忆。
+    # Solver 对话轨迹；包含 system/user/assistant/tool 消息，也是最终 solution*.json 的主要内容。
     solve_history: List[Dict[str, Any]]
+
+    # 当前执行所绑定的 plan 修订编号；用于标记执行轨迹对应哪一版计划，目前主要作为审计字段。
     active_plan_revision: int
+
+    # 虚拟世界的工具调用记忆；仅当工具返回引入新背景时追加，后续 MockTool/重规划会复用它。
     tool_call_history: List[str]
+
+    # 当前待执行的工具调用 JSON 字符串；路由到 MockTool 后由它读取，终止/重规划时可为空。
     current_tool_call: str
+
+    # 图路由信号；常见值包括 "Tool call"、"Transfer to user"、"Need replan"、"Terminated"。
     task_finished: str
+
+    # 失败终止原因；build_failure 统一写入，成功状态下通常为空字符串。
     failure_reason: str
+
+    # 工具调用纠错重试计数；保留给非法 tool_call 自纠错/兼容旧流程，目前初始化后未在主流程中递增。
     tool_call_retry_count: int
+
+    # Solver/ExecutePlan 已推进的轮次数；用于业务层最大轮次保护，避免图循环长期不产出 <answer>。
     solver_turn_count: int
 
 
