@@ -80,6 +80,19 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
     solve_history = state.get("solve_history") or _initial_solve_history_from_plan(state, config)
 
     solve_history.append({"role": "user", "content": execute_plan_final_answer_prompt})
+    if use_label_as_answer(config):
+        label = (state["seed_info"].get("label") or "").strip()
+        if label:
+            solve_history.append({
+                "role": "assistant",
+                "content": f"<answer>{label}</answer>",
+            })
+            return {
+                "current_tool_call": None,
+                "solve_history": solve_history,
+                "task_finished": "Terminated",
+                "solver_turn_count": solver_turn_count,
+            }
 
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
     if not is_non_empty_text(one_step_think_and_tool_call):
