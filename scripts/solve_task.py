@@ -1,6 +1,5 @@
 import json
 import logging
-import concurrent.futures
 import argparse
 import sys
 from pathlib import Path
@@ -9,6 +8,8 @@ from typing import List, Dict, Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from tracesynth.concurrency import run_concurrent_tasks
 
 from tracesynth.graph.graph_solve_task import run_agent
 from tracesynth.config_loader import load_run_config
@@ -81,28 +82,14 @@ def main():
             f"with {run_config['processing']['max_workers']} worker threads"
         )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=run_config["processing"]["max_workers"]) as executor:
-            future_to_task = {
-                executor.submit(process_single_task, task_data, run_config): task_data
-                for task_data in tasks_to_process
-            }
-
-            completed_tasks = 0
-            failed_tasks = 0
-
-            for future in concurrent.futures.as_completed(future_to_task):
-                task_data = future_to_task[future]
-                try:
-                    success = future.result()
-                    if success:
-                        completed_tasks += 1
-                    else:
-                        failed_tasks += 1
-                except Exception as e:
-                    logger.error(f"Task {task_data['id']} generated an exception: {e}")
-                    failed_tasks += 1
-
-            logger.info(f"Processing completed: {completed_tasks} successful, {failed_tasks} failed")
+        completed_tasks, failed_tasks = run_concurrent_tasks(
+            tasks_to_process,
+            lambda task_data: process_single_task(task_data, run_config),
+            max_workers=run_config["processing"]["max_workers"],
+            get_id=lambda task_data: str(task_data.get("id", "unknown")),
+            logger=logger,
+        )
+        logger.info(f"Processing completed: {completed_tasks} successful, {failed_tasks} failed")
 
     run_tasks_from_file(config)
 

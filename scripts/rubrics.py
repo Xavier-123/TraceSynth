@@ -8,7 +8,9 @@ from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
 
 from tracesynth.config_loader import load_run_config
+from tracesynth.concurrency import run_concurrent_tasks
 from tracesynth.functions.call_llms import call_llm_api
+from tracesynth.io import read_processed_ids
 
 # Configure logging
 logging.basicConfig(
@@ -462,7 +464,6 @@ def compare_trajectories(
 
 
 def main():
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from threading import Lock
 
     parser = argparse.ArgumentParser(description="Generate rubrics from solve trajectories")
@@ -495,17 +496,12 @@ def main():
     if already_processed_dir:
         os.makedirs(already_processed_dir, exist_ok=True)
 
-    # 读取已处理的任务
-    if os.path.exists(already_processed_path):
-        with open(already_processed_path, 'r', encoding='utf-8') as f:
-            already_processed = set([json.loads(line)["id"] for line in f])
-    else:
-        already_processed = set()
+    already_processed = read_processed_ids(already_processed_path)
     
     # 创建锁用于文件写入
     file_lock = Lock()
     
-    def process_task(specific_task):
+    def process_task(specific_task: str) -> bool:
         """处理单个任务的函数"""
         try:
             logger.info(msg=f"Processing folder: {specific_task}")
@@ -529,13 +525,13 @@ def main():
                     with open(already_processed_path, 'a', encoding='utf-8') as f:
                         f.write(json.dumps({"id": specific_task}, ensure_ascii=False) + '\n')
                                 
-                return specific_task, True, None
-            else:
-                return specific_task, False, "No result returned"
+                return True
+            logger.warning("Task %s failed: No result returned", specific_task)
+            return False
                 
         except Exception as e:
             logger.error(f"Error processing task {specific_task}: {str(e)}")
-            return specific_task, False, str(e)
+            return False
     
     # 获取待处理的任务列表
     tasks_to_process = [
@@ -548,34 +544,30 @@ def main():
     logger.info(f"Total tasks to process: {len(tasks_to_process)}")
     logger.info(f"Already processed: {len(already_processed)}")
     
-    # 设置线程数（可以根据需要调整）
     max_workers = agent_config["processing"]["max_workers"]
     
-    # 使用线程池执行任务
-    success_count = 0
-    failure_count = 0
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
-        future_to_task = {
-            executor.submit(process_task, task): task 
-            for task in tasks_to_process
-        }
-        
-        # 处理完成的任务
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            try:
-                task_id, success, error = future.result()
-                if success:
-                    success_count += 1
-                    logger.info(f"✓ Task {task_id} completed successfully ({success_count}/{len(tasks_to_process)})")
-                else:
-                    failure_count += 1
-                    logger.warning(f"✗ Task {task_id} failed: {error} ({failure_count} failures)")
-            except Exception as e:
-                failure_count += 1
-                logger.error(f"✗ Task {task} raised an exception: {str(e)}")
+    success_counter = {"count": 0}
+    total_tasks = len(tasks_to_process)
+
+    def process_task_with_logging(specific_task: str) -> bool:
+        success = process_task(specific_task)
+        if success:
+            success_counter["count"] += 1
+            logger.info(
+                "✓ Task %s completed successfully (%s/%s)",
+                specific_task,
+                success_counter["count"],
+                total_tasks,
+            )
+        return success
+
+    success_count, failure_count = run_concurrent_tasks(
+        tasks_to_process,
+        process_task_with_logging,
+        max_workers=max_workers,
+        get_id=lambda task_id: str(task_id),
+        logger=logger,
+    )
     
     # 输出统计信息
     logger.info("="*50)

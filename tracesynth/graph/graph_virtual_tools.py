@@ -1,7 +1,6 @@
 import os
 import json
 import glob
-import re
 import threading
 import logging
 from typing import TypedDict, List, Dict, Any
@@ -18,7 +17,6 @@ from tracesynth.io import (
 )
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
-    mock_tool_response,
 )
 from tracesynth.functions.call_llms import call_and_parse
 from tracesynth.functions.fuzzy_task import is_supervised_seed
@@ -34,6 +32,8 @@ from tracesynth.functions.evaluate_plan import (
 )
 from tracesynth.graph.node_utils import (
     AgentState,
+    allocate_next_solution_path,
+    apply_mock_tool_response,
     build_failure,
     create_step_config,
     get_synthesis_complexity,
@@ -365,61 +365,13 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
     logger.debug("------------------MockToolsAgent------------------")
     if state["breaked"]:
         return {}
-
-    step_config = create_step_config(config, "MockToolAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-
-    tool_call = state["current_tool_call"]
-    tools_description = state["checked_tools"]
-    tool_call_history = state["tool_call_history"]
-
-    tool_response, new_bg_introduced = mock_tool_response(
-        cfg,
-        tool_call,
-        tools_description,
-        tool_call_history,
+    return apply_mock_tool_response(
+        state,
+        config,
         complexity=get_synthesis_complexity(config),
         label=state["seed_info"].get("label", ""),
         context=state["seed_info"].get("context", "") or "",
     )
-    if tool_response is None:
-        return build_failure(
-            "MockToolAgent returned no tool response",
-            **{
-                "solve_history": state["solve_history"],
-                "tool_call_history": tool_call_history,
-                "current_tool_call": tool_call,
-            },
-        )
-
-    tool_response_message = {"role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"}
-    new_solve_history = state["solve_history"] + [tool_response_message]
-    new_tool_call_history = tool_call_history
-    if new_bg_introduced:
-        new_tool_call_history = tool_call_history + [f"Query:\n{tool_call}, Response:\n{tool_response}"]
-
-    update = {
-        "tool_call_history": new_tool_call_history,
-        "solve_history": new_solve_history,
-    }
-    if state.get("plan"):
-        # Plan-Execute 模式下记录执行过的计划步和工具返回，供终答、重规划和落盘审计使用。
-        current_plan_step = int(state.get("current_plan_step", 0) or 0)
-        plan = state.get("plan", [])
-        if 0 <= current_plan_step < len(plan):
-            planned_step = plan[current_plan_step]
-            update.update({
-                "executed_steps": (state.get("executed_steps") or []) + [planned_step],
-                "step_results": (state.get("step_results") or []) + [{
-                    "step_id": planned_step.get("step_id", current_plan_step + 1),
-                    "tool_call": tool_call,
-                    "tool_response": tool_response,
-                    "new_bg_introduced": bool(new_bg_introduced),
-                }],
-                "current_plan_step": current_plan_step + 1,
-            })
-
-    return update
 
 
 def should_execute_or_replan(state: AgentState):
@@ -630,17 +582,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
     }
 
     with log_file_lock:
-        solution_files = glob.glob(f"{solve_path}/solution*.json")
-        existing_numbers = []
-        for file in solution_files:
-            basename = os.path.basename(file)
-            match = re.match(r'solution(\d+)\.json$', basename)
-            if match:
-                existing_numbers.append(int(match.group(1)))
-
-        # 同一任务可能多次采样，按已有 solutionN.json 自动分配下一个编号。
-        next_number = max(existing_numbers) + 1 if existing_numbers else 1
-        solution_filename = f"{solve_path}/solution{next_number}.json"
+        solution_filename = allocate_next_solution_path(solve_path)
         save_data["solution_file"] = os.path.basename(solution_filename)
 
         with open(solution_filename, 'w', encoding='utf-8') as f:

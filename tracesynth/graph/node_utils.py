@@ -1,10 +1,13 @@
+import glob
 import json
+import os
 import re
 from typing import Any, Dict, List, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 
-from tracesynth.configuration import SynthesisComplexity, parse_range
+from tracesynth.configuration import ModelConfiguration, SynthesisComplexity, parse_range
+from tracesynth.functions import mock_tool_response
 
 
 class AgentState(TypedDict):
@@ -267,3 +270,90 @@ def should_paraphrase_question(config: RunnableConfig) -> bool:
     configurable = config.get("configurable", {}) if config else {}
     synthesis_cfg = configurable.get("synthesis") or {}
     return bool(synthesis_cfg.get("paraphrase_supervised_question", True))
+
+
+def allocate_next_solution_path(solve_path: str) -> str:
+    """Scan solve_path for existing solutionN.json files and return the next path."""
+    existing_numbers = []
+    for file in glob.glob(f"{solve_path}/solution*.json"):
+        match = re.match(r"solution(\d+)\.json$", os.path.basename(file))
+        if match:
+            existing_numbers.append(int(match.group(1)))
+    next_number = max(existing_numbers) + 1 if existing_numbers else 1
+    return f"{solve_path}/solution{next_number}.json"
+
+
+def apply_mock_tool_response(
+    state: AgentState,
+    config: RunnableConfig,
+    *,
+    complexity=None,
+    label: str = "",
+    context: str = "",
+) -> Dict[str, Any]:
+    """Call MockToolAgent and return solve_history/tool_call_history updates.
+
+    On failure returns a build_failure(...) payload; callers should check ``breaked``.
+    """
+    step_config = create_step_config(config, "MockToolAgent")
+    cfg = ModelConfiguration.from_runnable_config(step_config)
+
+    tool_call = state["current_tool_call"]
+    tools_description = state["checked_tools"]
+    tool_call_history = state["tool_call_history"]
+
+    mock_kwargs: Dict[str, Any] = {}
+    if complexity is not None:
+        mock_kwargs["complexity"] = complexity
+    if label:
+        mock_kwargs["label"] = label
+    if context:
+        mock_kwargs["context"] = context
+
+    tool_response, new_bg_introduced = mock_tool_response(
+        cfg,
+        tool_call,
+        tools_description,
+        tool_call_history,
+        **mock_kwargs,
+    )
+    if tool_response is None:
+        return build_failure(
+            "MockToolAgent returned no tool response",
+            solve_history=state["solve_history"],
+            tool_call_history=tool_call_history,
+            current_tool_call=tool_call,
+        )
+
+    tool_response_message = {
+        "role": "tool",
+        "content": f"<tool_response>{tool_response}</tool_response>",
+    }
+    new_solve_history = state["solve_history"] + [tool_response_message]
+    new_tool_call_history = tool_call_history
+    if new_bg_introduced:
+        new_tool_call_history = tool_call_history + [
+            f"Query:\n{tool_call}, Response:\n{tool_response}"
+        ]
+
+    update: Dict[str, Any] = {
+        "tool_call_history": new_tool_call_history,
+        "solve_history": new_solve_history,
+    }
+    if state.get("plan"):
+        current_plan_step = int(state.get("current_plan_step", 0) or 0)
+        plan = state.get("plan", [])
+        if 0 <= current_plan_step < len(plan):
+            planned_step = plan[current_plan_step]
+            update.update({
+                "executed_steps": (state.get("executed_steps") or []) + [planned_step],
+                "step_results": (state.get("step_results") or []) + [{
+                    "step_id": planned_step.get("step_id", current_plan_step + 1),
+                    "tool_call": tool_call,
+                    "tool_response": tool_response,
+                    "new_bg_introduced": bool(new_bg_introduced),
+                }],
+                "current_plan_step": current_plan_step + 1,
+            })
+
+    return update

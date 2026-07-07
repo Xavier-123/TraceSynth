@@ -1,6 +1,4 @@
 import logging
-import concurrent.futures
-from tqdm import tqdm
 import argparse
 import sys
 from pathlib import Path
@@ -9,6 +7,8 @@ from typing import Dict, Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from tracesynth.concurrency import run_concurrent_tasks
 
 from tracesynth.io import (
     InputConfig,
@@ -165,43 +165,23 @@ def main():
             f"with {run_config['processing']['max_workers']} worker threads"
         )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=run_config["processing"]["max_workers"]) as executor:
-            # 任务间彼此独立，可以并发合成；文件写入由 graph 层和 IO 层的锁保护。
-            future_to_task = {
-                executor.submit(process_single_task, seed_info, run_config): seed_info
-                for seed_info in tasks_to_process
-            }
+        def on_task_exception(seed_info: Dict[str, Any], exc: Exception) -> None:
+            if isinstance(exc, SeedRecordError):
+                logger.error(f"Task {seed_info.get('id', 'unknown')} invalid seed: {exc}")
+            else:
+                logger.error(f"Task {seed_info.get('id', 'unknown')} generated an exception: {exc}")
 
-            completed_tasks = 0
-            failed_tasks = 0
-            total_tasks = len(tasks_to_process)
-
-            with tqdm(
-                total=total_tasks,
-                desc="Synthesizing",
-                unit="task",
-                dynamic_ncols=True,
-                colour="green",
-            ) as pbar:
-                for future in concurrent.futures.as_completed(future_to_task):
-                    seed_info = future_to_task[future]
-                    try:
-                        success = future.result()
-                        if success:
-                            completed_tasks += 1
-                        else:
-                            failed_tasks += 1
-                    except SeedRecordError as e:
-                        logger.error(f"Task {seed_info.get('id', 'unknown')} invalid seed: {e}")
-                        failed_tasks += 1
-                    except Exception as e:
-                        logger.error(f"Task {seed_info.get('id', 'unknown')} generated an exception: {e}")
-                        failed_tasks += 1
-                    finally:
-                        pbar.update(1)
-                        pbar.set_postfix(success=completed_tasks, failed=failed_tasks)
-
-            logger.info(f"Processing completed: {completed_tasks} successful, {failed_tasks} failed")
+        completed_tasks, failed_tasks = run_concurrent_tasks(
+            tasks_to_process,
+            lambda seed_info: process_single_task(seed_info, run_config),
+            max_workers=run_config["processing"]["max_workers"],
+            get_id=lambda seed_info: str(seed_info.get("id", "unknown")),
+            desc="Synthesizing",
+            show_progress=True,
+            logger=logger,
+            on_exception=on_task_exception,
+        )
+        logger.info(f"Processing completed: {completed_tasks} successful, {failed_tasks} failed")
 
     run_tasks_from_file(config)
 

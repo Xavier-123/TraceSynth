@@ -2,7 +2,6 @@ import os
 import json
 import yaml
 import glob
-import re
 import threading
 
 from langgraph.graph import StateGraph, END
@@ -10,10 +9,12 @@ from langchain_core.runnables import RunnableConfig
 
 from tracesynth.configuration import ModelConfiguration
 from tracesynth.functions import (
-    mock_tool_response, solve_task_by_tools, mock_user_response
+    solve_task_by_tools, mock_user_response
 )
 from tracesynth.graph.node_utils import (
     AgentState,
+    allocate_next_solution_path,
+    apply_mock_tool_response,
     build_failure,
     create_step_config,
     get_graph_recursion_limit,
@@ -141,35 +142,7 @@ For each function call, return a json object with function name and arguments wi
 def mock_tools_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
         return {}
-
-    step_config = create_step_config(config, "MockToolAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-
-    tool_call = state["current_tool_call"]
-    tools_description = state["checked_tools"]
-    tool_call_history = state["tool_call_history"]
-
-    tool_response, new_bg_introduced = mock_tool_response(cfg, tool_call, tools_description, tool_call_history)
-    if tool_response is None:
-        return build_failure(
-            "MockToolAgent returned no tool response",
-            solve_history=state["solve_history"],
-            tool_call_history=tool_call_history,
-            current_tool_call=tool_call,
-        )
-
-    tool_response_message = {
-        "role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"
-    }
-    new_solve_history = state["solve_history"] + [tool_response_message]
-    new_tool_call_history = tool_call_history
-    if new_bg_introduced:
-        new_tool_call_history = tool_call_history + [f"Query:\n{tool_call}, Response:\n{tool_response}"]
-
-    return {
-        "tool_call_history": new_tool_call_history,
-        "solve_history": new_solve_history,
-    }
+    return apply_mock_tool_response(state, config)
 
 
 def mock_user_node(state: AgentState, config: RunnableConfig):
@@ -243,17 +216,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         return
 
     for _ in range(repeat_times):
-        solution_files = glob.glob(f"{solve_path}/solution*.json")
-        # 读取已有 solutionN.json 编号，保证重复采样追加而不是覆盖。
-        existing_numbers = []
-        for file in solution_files:
-            basename = os.path.basename(file)
-            # 只匹配 solution<number>.json，忽略其他临时或评测文件。
-            match = re.match(r'solution(\d+)\.json$', basename)
-            if match:
-                existing_numbers.append(int(match.group(1)))
-
-        next_number = max(existing_numbers) + 1 if existing_numbers else 1
+        solution_filename = allocate_next_solution_path(solve_path)
 
         if os.path.exists(tool_call_history_path):
             with open(tool_call_history_path, 'r', encoding='utf-8') as f:
@@ -294,8 +257,6 @@ def run_agent(seed_info: dict, run_config: dict = None):
                     "recursion_limit": graph_config["recursion_limit"],
                 },
             )
-
-        solution_filename = f"{solve_path}/solution{next_number}.json"
 
         with open(solution_filename, 'w', encoding='utf-8') as f:
             f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
