@@ -425,6 +425,18 @@ def extract_predicted_answer(solve_history: Any) -> Optional[str]:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         content = message.get("content") or ""
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("action") == "final_answer"
+            and isinstance(payload.get("answer"), str)
+        ):
+            answer = payload["answer"].strip()
+            if answer:
+                return answer
         match = re.search(r"<answer>(.*?)</answer>", content, re.DOTALL | re.IGNORECASE)
         if match:
             answer = match.group(1).strip()

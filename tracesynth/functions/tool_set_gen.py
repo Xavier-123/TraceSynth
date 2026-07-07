@@ -1,5 +1,6 @@
-import re
-from .call_llms import ParseError, call_and_parse
+import json
+
+from .call_llms import ParseError, call_and_parse, parse_json_object
 from .prompt import tool_set_prompt
 
 
@@ -8,26 +9,24 @@ def _is_non_empty_text(value) -> bool:
 
 
 def _parse_tool_set_response(content: str):
-    # reasoning 只用于模型思考，不进入后续业务字段。
-    all_content = re.sub(r"<reasoning>(.+?)</reasoning>", "", content, flags=re.DOTALL)
+    payload = parse_json_object(content)
+    task = payload.get("task")
+    tools = payload.get("tools")
+    workflow = payload.get("workflow")
+    restrict = payload.get("restriction")
 
-    # 各段取最后一次匹配，兼容模型先输出草稿再修正的情况。
-    tool_matches = re.findall(r"<tools>(.+?)</tools>", all_content, re.DOTALL)
-    tools = tool_matches[-1].strip() if tool_matches else None
+    if not _is_non_empty_text(task):
+        raise ParseError("missing required JSON field: task")
+    if not isinstance(tools, list) or not tools:
+        raise ParseError("JSON field tools must be a non-empty array")
+    if not _is_non_empty_text(workflow):
+        raise ParseError("missing required JSON field: workflow")
+    if not _is_non_empty_text(restrict):
+        raise ParseError("missing required JSON field: restriction")
 
-    workflow_matches = re.findall(r"<workflow>(.+?)</workflow>", all_content, re.DOTALL)
-    workflow = workflow_matches[-1].strip() if workflow_matches else None
-
-    task_matches = re.findall(r"<task>(.+?)</task>", all_content, re.DOTALL)
-    task = task_matches[-1].strip() if task_matches else None
-
-    restrict_matches = re.findall(r"<restriction>(.+?)</restriction>", all_content, re.DOTALL)
-    restrict = restrict_matches[-1].strip() if restrict_matches else None
-
-    if not all(_is_non_empty_text(value) for value in (all_content, task, tools, workflow, restrict)):
-        raise ParseError("missing required sections: task/tools/workflow/restriction")
-
-    return all_content, task, tools, workflow, restrict
+    all_content = json.dumps(payload, ensure_ascii=False, indent=2)
+    tools_json = json.dumps(tools, ensure_ascii=False, indent=2)
+    return all_content, task.strip(), tools_json, workflow.strip(), restrict.strip()
 
 
 def generate_tool_set(cfg, background_info, complexity=None):
@@ -48,6 +47,7 @@ def generate_tool_set(cfg, background_info, complexity=None):
         messages,
         _parse_tool_set_response,
         step_name="ToolSetGenAgent",
+        json_mode=True,
     )
     if parsed is None:
         return None, None, None, None, None

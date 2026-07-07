@@ -1,17 +1,16 @@
 import json
 import logging
-import re
 from typing import Any, Dict, List
 
 from langchain_core.runnables import RunnableConfig
 
 from tracesynth.configuration import ModelConfiguration
+from tracesynth.functions.call_llms import ParseError, parse_json_object
 from tracesynth.functions import solve_task_by_tools
 from tracesynth.functions.prompt import (
     execute_plan_evidence_section_prompt,
     execute_plan_final_answer_prompt,
     execute_plan_preapproved_prompt,
-    planned_tool_message_template,
     solve_task_system_prompt,
     solve_task_user_prompt,
 )
@@ -67,11 +66,20 @@ def _initial_solve_history_from_plan(state: AgentState, config: RunnableConfig) 
 
 
 def _format_planned_tool_message(step: Dict[str, Any], tool_call: str) -> str:
-    return planned_tool_message_template.format(
-        step_id=step.get("step_id"),
-        purpose=step.get("purpose", ""),
-        stage=step.get("stage", ""),
-        tool_call=tool_call,
+    try:
+        parsed_tool_call: Any = json.loads(tool_call)
+    except (TypeError, json.JSONDecodeError):
+        parsed_tool_call = tool_call
+    return json.dumps(
+        {
+            "action": "tool_call",
+            "reasoning": (
+                f"Executing planned step {step.get('step_id')}: "
+                f"{step.get('purpose', '')} Stage: {step.get('stage', '')}"
+            ),
+            "tool_call": parsed_tool_call,
+        },
+        ensure_ascii=False,
     )
 
 
@@ -141,14 +149,20 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         )
 
     solve_history = solve_history + [{"role": "assistant", "content": one_step_think_and_tool_call}]
-    answer_match = re.search(
-        r"<answer>(.*?)</answer>",
-        one_step_think_and_tool_call,
-        re.DOTALL | re.IGNORECASE,
-    )
+    try:
+        action_payload = parse_json_object(one_step_think_and_tool_call)
+    except ParseError as exc:
+        return build_failure(
+            f"Final Response returned invalid JSON after parser success: {exc}",
+            **{
+                "solve_history": solve_history,
+                "tool_call_history": state.get("tool_call_history", []),
+                "solver_turn_count": solver_turn_count,
+            },
+        )
 
-    if answer_match:
-        model_answer = answer_match.group(1).strip()
+    if action_payload.get("action") == "final_answer":
+        model_answer = str(action_payload.get("answer", "")).strip()
         if use_label_as_answer(config):
             label = (state["seed_info"].get("label") or "").strip()
             if label:
@@ -164,7 +178,13 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
                             f"the supervised label; treating as insufficient/incorrect evidence chain."
                         ),
                     )
-                solve_history[-1] = {"role": "assistant", "content": f"<answer>{label}</answer>"}
+                solve_history[-1] = {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"action": "final_answer", "answer": label},
+                        ensure_ascii=False,
+                    ),
+                }
         return {
             "current_tool_call": None,
             "solve_history": solve_history,
@@ -172,11 +192,17 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
             "solver_turn_count": solver_turn_count,
         }
 
-    if tool_call_info is not None:
-        return _insufficient_evidence_outcome(state, config, solve_history, solver_turn_count)
+    if action_payload.get("action") in {"tool_call", "ask_user"} or tool_call_info is not None:
+        return _insufficient_evidence_outcome(
+            state,
+            config,
+            solve_history,
+            solver_turn_count,
+            extra_reason=f"Final Response returned action={action_payload.get('action')!r} instead of final_answer.",
+        )
 
     return build_failure(
-        "Final Response completed planned execution but did not produce <answer>",
+        "Final Response completed planned execution but did not produce final_answer action",
         **{
             "solve_history": solve_history,
             "tool_call_history": state.get("tool_call_history", []),

@@ -1,23 +1,19 @@
-import re
 from typing import Dict, Any
-from .call_llms import ParseError, call_and_parse
+from .call_llms import ParseError, call_and_parse, parse_json_object
 from .prompt import fuzzy_task_prompt
 
 
 def _parse_fuzzy_task_response(content: str):
-    # 取最后一个标签结果，适配 LLM 输出“草稿 + 修正版”的情况。
-    task_matches = re.findall(r"<task>(.+?)</task>", content, re.DOTALL)
-    task = task_matches[-1].strip() if task_matches else None
+    payload = parse_json_object(content)
+    task = payload.get("task")
+    bg = payload.get("background")
 
-    bg_matches = re.findall(r"<background>(.+?)</background>", content, re.DOTALL)
-    bg = bg_matches[-1].strip() if bg_matches else None
+    if not isinstance(task, str) or not task.strip():
+        raise ParseError("missing required JSON field: task")
+    if not isinstance(bg, str) or not bg.strip():
+        raise ParseError("missing required JSON field: background")
 
-    if not task or not task.strip():
-        raise ParseError("missing <task> tag")
-    if not bg or not bg.strip():
-        raise ParseError("missing <background> tag")
-
-    return task, bg
+    return task.strip(), bg.strip()
 
 
 def generate_fuzzy_task(cfg, initial_task_info, complexity=None):
@@ -38,6 +34,7 @@ def generate_fuzzy_task(cfg, initial_task_info, complexity=None):
         messages,
         _parse_fuzzy_task_response,
         step_name="FuzzyTaskAgent",
+        json_mode=True,
     )
     if parsed is None:
         return None, None

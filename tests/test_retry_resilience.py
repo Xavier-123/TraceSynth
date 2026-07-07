@@ -20,14 +20,15 @@ from tracesynth.functions.call_llms import (
 from tracesynth.functions.fuzzy_task import _parse_fuzzy_task_response
 from tracesynth.functions.mock_tools import _parse_mock_tool_response, mock_tool_response
 from tracesynth.functions.mock_user import _parse_mock_user_response
+from tracesynth.functions.solve_task import _parse_solver_response
 from tracesynth.functions.tool_check import _parse_checked_tools
 from tracesynth.graph.graph_virtual_tools import (
     execute_plan_node,
-    get_tool_call_max_retries,
     should_continue_execution,
     should_execute_or_replan,
     validate_tool_call,
 )
+from tracesynth.graph.node_utils import get_tool_call_max_retries
 
 
 class RetryCfg:
@@ -56,24 +57,24 @@ def test_is_retryable_api_error():
 
 def test_parse_checked_tools():
     tools = _parse_checked_tools(
-        '<tools>[{"name":"t","parameters":{"type":"object","properties":{}}}]</tools>'
+        '{"tools":[{"name":"t","parameters":{"type":"object","properties":{}}}]}'
     )
     assert len(tools) == 1
     try:
-        _parse_checked_tools("no tags")
+        _parse_checked_tools("no json")
         raise AssertionError("expected ParseError")
     except ParseError:
         pass
 
 
 def test_parse_fuzzy_task():
-    task, bg = _parse_fuzzy_task_response("<task>hello</task><background>world</background>")
+    task, bg = _parse_fuzzy_task_response('{"task":"hello","background":"world"}')
     assert task == "hello"
     assert bg == "world"
 
 
 def test_call_and_parse_resampling():
-    responses = ["bad", "bad", "<reply>ok</reply>"]
+    responses = ["bad", "bad", '{"reply":"ok"}']
     call_count = {"n": 0}
 
     def fake_call_llm_messages(**kwargs):
@@ -95,7 +96,7 @@ def test_call_and_parse_resampling():
 
 
 def test_call_and_parse_feedback_on_retry():
-    responses = ["bad", "bad", "<reply>ok</reply>"]
+    responses = ["bad", "bad", '{"reply":"ok"}']
     call_count = {"n": 0}
     captured_messages = []
 
@@ -149,10 +150,55 @@ def test_call_and_parse_returns_last_messages_after_parse_exhaustion():
         assert messages[-1] == {"role": "assistant", "content": "bad-two"}
 
 
+def test_call_and_parse_json_mode_sets_response_format():
+    captured = []
+
+    def fake_call_llm_messages(**kwargs):
+        captured.append(kwargs)
+        msgs = list(kwargs["messages"])
+        msgs.append({"role": "assistant", "content": '{"reply":"ok"}'})
+        return msgs
+
+    with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
+        result, _ = call_and_parse(
+            RetryCfg(),
+            [{"role": "user", "content": "hi"}],
+            _parse_mock_user_response,
+            step_name="test",
+            json_mode=True,
+        )
+    assert result == "ok"
+    assert captured[0]["llm_params"]["response_format"] == {"type": "json_object"}
+
+
+def test_call_and_parse_json_mode_keeps_configured_response_format():
+    class Cfg(RetryCfg):
+        llm_params = {"response_format": {"type": "text"}}
+
+    captured = []
+
+    def fake_call_llm_messages(**kwargs):
+        captured.append(kwargs)
+        msgs = list(kwargs["messages"])
+        msgs.append({"role": "assistant", "content": '{"reply":"ok"}'})
+        return msgs
+
+    with patch("tracesynth.functions.call_llms.call_llm_messages", side_effect=fake_call_llm_messages):
+        result, _ = call_and_parse(
+            Cfg(),
+            [{"role": "user", "content": "hi"}],
+            _parse_mock_user_response,
+            step_name="test",
+            json_mode=True,
+        )
+    assert result == "ok"
+    assert captured[0]["llm_params"]["response_format"] == {"type": "text"}
+
+
 def test_messages_for_chat_completion_converts_pseudo_tool_role():
     messages = [
         {"role": "user", "content": "question"},
-        {"role": "tool", "content": "<tool_response>answer</tool_response>"},
+        {"role": "tool", "content": '{"tool_response":"answer"}'},
     ]
 
     converted = messages_for_chat_completion(messages)
@@ -161,8 +207,37 @@ def test_messages_for_chat_completion_converts_pseudo_tool_role():
     assert converted[0] == messages[0]
     assert converted[1] == {
         "role": "user",
-        "content": "<tool_response>answer</tool_response>",
+        "content": '{"tool_response":"answer"}',
     }
+
+
+def test_parse_solver_response_json_actions():
+    content, tool_call = _parse_solver_response(
+        '{"action":"tool_call","reasoning":"need search","tool_call":{"name":"Search","arguments":{"query":"q"}}}'
+    )
+    assert content.startswith('{"action"')
+    assert tool_call == '{"name": "Search", "arguments": {"query": "q"}}'
+
+    content, tool_call = _parse_solver_response(
+        '{"action":"ask_user","reasoning":"missing time","message":"Which year?"}'
+    )
+    assert tool_call is None
+
+    content, tool_call = _parse_solver_response(
+        '{"action":"final_answer","answer":"done"}'
+    )
+    assert tool_call is None
+
+    for bad_response in (
+        '{"action":"tool_call","tool_call":{"name":"Search","arguments":[]}}',
+        '{"action":"ask_user","message":""}',
+        '{"action":"final_answer","answer":""}',
+    ):
+        try:
+            _parse_solver_response(bad_response)
+            raise AssertionError("expected ParseError")
+        except ParseError:
+            pass
 
 
 def test_call_and_parse_reraises_api_errors():
@@ -269,7 +344,7 @@ def test_solver_turn_limit_returns_failure_without_extra_model_call():
         }
     }
 
-    with patch("tracesynth.graph.execute_plan_node.solve_task_by_tools") as mock_solve:
+    with patch("tracesynth.graph.graph_virtual_tools._generate_final_answer_from_plan") as mock_solve:
         update = execute_plan_node(state, config)
 
     mock_solve.assert_not_called()
@@ -302,7 +377,10 @@ if __name__ == "__main__":
     test_call_and_parse_resampling()
     test_call_and_parse_feedback_on_retry()
     test_call_and_parse_returns_last_messages_after_parse_exhaustion()
+    test_call_and_parse_json_mode_sets_response_format()
+    test_call_and_parse_json_mode_keeps_configured_response_format()
     test_messages_for_chat_completion_converts_pseudo_tool_role()
+    test_parse_solver_response_json_actions()
     test_call_and_parse_reraises_api_errors()
     test_parse_mock_tool_response_json_contract()
     test_mock_tool_response_resamples_after_invalid_json()

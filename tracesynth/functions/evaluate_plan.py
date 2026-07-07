@@ -4,8 +4,8 @@ import threading
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from tracesynth.functions.call_llms import ParseError
-from tracesynth.functions.plan_trajectory import extract_xml_json, tools_for_prompt
+from tracesynth.functions.call_llms import ParseError, parse_json_object
+from tracesynth.functions.plan_trajectory import tools_for_prompt
 from tracesynth.functions.prompt import (
     plan_evaluation_system_prompt,
     plan_evaluation_user_prompt,
@@ -188,9 +188,7 @@ def annotate_plan_evaluation(
 
 
 def _parse_plan_evaluation_response(content: str) -> Dict[str, Any]:
-    evaluation = extract_xml_json(content, "plan_evaluation")
-    if not isinstance(evaluation, dict):
-        raise ParseError("plan_evaluation must be a JSON object")
+    evaluation = parse_json_object(content)
     if "is_valid" not in evaluation or not isinstance(evaluation["is_valid"], bool):
         raise ParseError("plan_evaluation.is_valid must be a boolean")
     if not (

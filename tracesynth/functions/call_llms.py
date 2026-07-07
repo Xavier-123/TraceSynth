@@ -1,5 +1,7 @@
+import json
 import logging
 import random
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -19,6 +21,31 @@ T = TypeVar("T")
 
 class ParseError(Exception):
     """Raised when LLM output cannot be parsed or validated."""
+
+
+def _strip_json_code_fence(content: str) -> str:
+    cleaned = (content or "").strip()
+    match = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else cleaned
+
+
+def parse_json_object(content: str) -> Dict[str, Any]:
+    """Parse one JSON object, accepting optional Markdown JSON fences."""
+    json_str = _strip_json_code_fence(content)
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError as exc:
+        raise ParseError(f"invalid JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ParseError("JSON response must be an object")
+    return parsed
+
+
+def _with_json_response_format(llm_params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    params = dict(llm_params or {})
+    if "response_format" not in params:
+        params["response_format"] = {"type": "json_object"}
+    return params
 
 
 def messages_for_chat_completion(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -236,6 +263,7 @@ def call_and_parse(
     *,
     step_name: str = "LLM",
     feedback_on_error: bool = True,
+    json_mode: bool = False,
 ) -> tuple[Optional[T], List[Dict[str, str]]]:
     """Call LLM with API retry; on parse failure, resample up to parse_max_retries times."""
     parse_max_retries = getattr(cfg, "parse_max_retries", 2)
@@ -248,6 +276,9 @@ def call_and_parse(
     for attempt in range(total_attempts):
         try:
             # 第一层容错在 API 调用内部处理；这里拿到内容后再做结构解析。
+            llm_params = getattr(cfg, "llm_params", None)
+            if json_mode:
+                llm_params = _with_json_response_format(llm_params)
             result_messages = call_llm_messages(
                 messages=working_messages,
                 api_base=cfg.api_base,
@@ -258,7 +289,7 @@ def call_and_parse(
                 use_thinking=cfg.use_thinking,
                 api_max_retries=getattr(cfg, "api_max_retries", 3),
                 api_retry_base=getattr(cfg, "api_retry_base", 1.0),
-                llm_params=getattr(cfg, "llm_params", None),
+                llm_params=llm_params,
                 extra_body=getattr(cfg, "extra_body", None),
             )
             last_result_messages = result_messages

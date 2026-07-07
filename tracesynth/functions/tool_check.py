@@ -1,25 +1,15 @@
-import json
-import re
 from typing import Any, Dict, List, Optional
 
-from .call_llms import ParseError, call_and_parse
+from .call_llms import ParseError, call_and_parse, parse_json_object
 from .prompt import tool_check_prompt
 
 
 def _parse_checked_tools(content: str) -> List[Dict[str, Any]]:
-    tool_matches = re.findall(r"<tools>(.+?)</tools>", content, re.DOTALL)
-    if not tool_matches:
-        raise ParseError("missing <tools> tag")
-
-    # ToolCheckAgent 输出的是可执行工具 schema，必须是非空 JSON 数组。
-    tools_str = tool_matches[-1].strip()
-    try:
-        checked_tools = json.loads(tools_str)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ParseError(f"invalid JSON in <tools>: {exc}") from exc
+    payload = parse_json_object(content)
+    checked_tools = payload.get("tools")
 
     if not isinstance(checked_tools, list) or not checked_tools:
-        raise ParseError("checked_tools is empty or not a list")
+        raise ParseError("JSON field tools must be a non-empty array")
 
     for tool in checked_tools:
         # 最小 schema 校验：名称和 parameters 必须存在，required 参数细节由 validate_tool_call 再检查。
@@ -47,5 +37,6 @@ def tool_check(cfg, tool_description, task_description, complexity=None) -> Opti
         messages,
         _parse_checked_tools,
         step_name="ToolCheckAgent",
+        json_mode=True,
     )
     return parsed

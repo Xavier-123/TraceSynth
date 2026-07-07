@@ -73,11 +73,11 @@ def test_run_agent_graph_failure_writes_partial_trajectory(tmp_path):
         "seed_info": _seed(),
         "breaked": True,
         "task_finished": "Terminated",
-        "failure_reason": "SolveAgent exceeded max_solver_turns=1 without producing <answer>",
+        "failure_reason": "SolveAgent exceeded max_solver_turns=1 without producing final_answer",
         "fuzzy_task": "q",
         "checked_tools": [{"name": "Search", "parameters": {}}],
         "solve_history": [{"role": "assistant", "content": "partial reasoning"}],
-        "tool_call_history": ["Query: Search, Response: partial"],
+        "tool_call_history": [{"query": {"name": "Search", "arguments": {}}, "response": "partial"}],
     }
 
     with patch("tracesynth.graph.graph_virtual_tools.graph.invoke", return_value=final_state):
@@ -103,7 +103,7 @@ def test_run_agent_missing_answer_label_check_is_failure(tmp_path):
         "failure_reason": "",
         "fuzzy_task": "q",
         "checked_tools": [{"name": "Search", "parameters": {}}],
-        "solve_history": [{"role": "assistant", "content": "<answer>   </answer>"}],
+        "solve_history": [{"role": "assistant", "content": '{"action":"final_answer","answer":"   "}'}],
         "tool_call_history": [],
         "restrict": "",
         "task_background": "",

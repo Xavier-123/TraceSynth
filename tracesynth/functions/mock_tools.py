@@ -1,26 +1,12 @@
 import json
-import re
 from typing import Any, Dict, Tuple, Union
 
-from .call_llms import ParseError, call_and_parse
+from .call_llms import ParseError, call_and_parse, parse_json_object
 from .prompt import mock_tool_system_prompt, mock_tool_user_prompt
 
 
 def _parse_mock_tool_response(response_text: str) -> Tuple[Union[Dict[str, Any], str], bool]:
-    cleaned_text = response_text.strip()
-
-    json_block_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
-    match = re.search(json_block_pattern, cleaned_text)
-    # 兼容模型把 JSON 包在 Markdown 代码块里的情况。
-    json_str = match.group(1).strip() if match else cleaned_text
-
-    try:
-        parsed_data = json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        raise ParseError(f"invalid JSON in tool response: {exc}") from exc
-
-    if not isinstance(parsed_data, dict):
-        raise ParseError("tool response JSON must be an object")
+    parsed_data = parse_json_object(response_text)
     if "tool_response" not in parsed_data:
         raise ParseError("tool response JSON is missing required field 'tool_response'")
 
@@ -63,6 +49,7 @@ def mock_tool_response(
         messages,
         _parse_mock_tool_response,
         step_name="MockToolAgent",
+        json_mode=True,
     )
     if parsed is None:
         return None, False

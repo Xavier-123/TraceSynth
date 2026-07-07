@@ -73,21 +73,21 @@ tool_set_prompt = """你是一名精通 Agentic RAG（智能体检索增强生�
 - 全程遵守步骤 2 中的约束条件。
 
 # 最终输出固定格式
-<reasoning>
-分步推理全过程……
-</reasoning>
-
-## 1. 待执行的 Agentic RAG 任务
-<task>用户 Query 场景及知识库背景完整描述（含为何需要多轮迭代检索）</task>
-
-## 2. RAG 工具定义（JSON 数组格式）
-<tools>RAG 工具 JSON 数组，每项工具 description 中须标注所属流水线阶段</tools>
-
-## 3. 工具调用专属约束规则
-<restriction>工具[指定工具名]严禁用于[禁止的具体操作]。设置该约束的现实原因：[具象理由，如精确率损失、索引延迟、图谱覆盖不足、计算开销等]。[指定工具名]必须取自上方工具定义。违反本条约束将直接导致任务失败。</restriction>
-
-## 4. 高层级 Agentic RAG 管道流程
-<workflow>按六步流程描述的宏观执行步骤，须包含步骤5迭代回路说明；无需填写工具调用具体参数</workflow>"""
+仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。顶层字段固定为：
+{{
+  "reasoning": "分步推理全过程",
+  "task": "用户 Query 场景及知识库背景完整描述（含为何需要多轮迭代检索）",
+  "tools": [
+    {{
+      "name": "工具名称",
+      "description": "工具功能说明，须标明所属 Agentic RAG 流水线阶段。",
+      "parameters": {{"type": "object", "properties": {{}}, "required": []}},
+      "outputs": {{"type": "object", "properties": {{}}}}
+    }}
+  ],
+  "restriction": "工具[指定工具名]严禁用于[禁止的具体操作]。设置该约束的现实原因：[具象理由]。[指定工具名]必须取自 tools 中的工具定义。违反本条约束将直接导致任务失败。",
+  "workflow": "按六步流程描述的宏观执行步骤，须包含步骤5迭代回路说明；无需填写工具调用具体参数"
+}}"""
 
 fuzzy_task_prompt = """
 你是一名 Agentic RAG 评测任务设计专家，擅长构造用于考核智能体检索增强问答能力的真实场景任务。
@@ -104,23 +104,17 @@ fuzzy_task_prompt = """
 
 输出规范
 
-1. 首先写出设计高质量评测任务的分步推导思路，置于 <reasoning></reasoning> 标签内。须说明：用户 Query 为何需要多轮迭代检索、背景知识如何支撑知识库模拟、任务如何隐式要求 Query 优化与多路召回协同。
-<reasoning>
-（分步推导思路……）
-</reasoning>
+仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。顶层字段固定为：
+{{
+  "reasoning": "设计高质量评测任务的分步推导思路，说明用户 Query 为何需要多轮迭代检索、背景知识如何支撑知识库模拟、任务如何隐式要求 Query 优化与多路召回协同。",
+  "task": "一句话模糊化用户 Query，模拟真实用户提问，不暴露 RAG 流水线细节。",
+  "background": "任务配套背景资料。"
+}}
 
-2. 给出用户 Query（任务描述），置于 <task></task> 标签中。以**用户口吻**提出检索/问答请求，行文简洁，详细补充信息见下一板块：
-<task>
-（一句话模糊化用户 Query，模拟真实用户提问，不暴露 RAG 流水线细节）
-</task>
-
-3. 补充任务配套背景资料，置于 <background></background> 标签。内容须包含：
+background 字段内容须包含：
    - 知识库领域背景（智能体模拟检索时的「虚拟知识库」上下文）
    - 完成任务所需的前置认知与隐含子目标
    - 信息缺口设计：{iteration_requirement}（首轮检索不应一次凑齐全部答案要素）
-<background>
-（智能体需要掌握的背景信息，内容详实完整）
-</background>
 
 4. 任务与背景描述硬性约束
 - 篇幅不宜冗长、细节不宜堆砌；
@@ -167,18 +161,21 @@ tool_check_prompt = """
 5. 最终校验：仅依靠修改后的工具集，智能体须能完整走通 Agentic RAG 六步流程（{iteration_requirement}）。
 
 ## 输出规范
-1. 逐工具审核推导过程，包裹在 <reasoning> 标签内：
-<reasoning>
-（分步推导思考过程……）
-</reasoning>
-
-2. 经审核修改后的全部工具，包裹在 <tools> 标签内：
-<tools>
-（可供大模型模拟运行的虚拟 RAG 工具 JSON 数组）
-</tools>
+仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。顶层字段固定为：
+{{
+  "reasoning": "逐工具审核推导过程",
+  "tools": [
+    {{
+      "name": "HyDE_Query_Generator",
+      "description": "工具功能说明，须标明所属流水线阶段。",
+      "parameters": {{"type": "object", "properties": {{}}, "required": []}},
+      "outputs": {{"type": "object", "properties": {{}}}}
+    }}
+  ]
+}}
 
 重要注意事项：
-输出合法工具 JSON 数组，可直接通过 `json.loads` 解析为 `List[Dict[str, Any]]`。工具命名遵循代码规范，例：`HyDE_Query_Generator`，禁止空格。
+`tools` 必须是合法工具 JSON 数组，可直接作为 `List[Dict[str, Any]]` 使用。工具命名遵循代码规范，例：`HyDE_Query_Generator`，禁止空格。
 
 任务描述（用户 Query）：{task_description}
 原始工具说明：{tool_description}
@@ -202,10 +199,10 @@ mock_user_prompt = """
 2. 你仅回答关于 Query 意图澄清、业务上下文、时间范围、实体指代等问题；**不得**替智能体提供检索结果或知识库文档内容。
 3. 不得向智能体透露任何 RAG 流水线思路、工具名称或检索策略提示。
 
-请按照以下格式输出你的回复：
-<reply>
-（你的回复内容）
-</reply>
+仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。格式：
+{{
+  "reply": "你的回复内容"
+}}
 """
 
 mock_tool_system_prompt = '''
@@ -241,7 +238,6 @@ mock_tool_system_prompt = '''
    - "YES" 代表新增的文档/实体/关系须存档；"NO" 代表仅返回已有知识的检索视图。
 
 ## Few-shot 示例（仅供格式与风格参考）
-```json
 {
    "tool_response": {
      "candidates": [
@@ -265,17 +261,14 @@ mock_tool_system_prompt = '''
    },
    "new_bg_introduced": "NO"
 }
-```
 
 请严格按照以下 JSON 格式输出结果：
-```json
 {
   "tool_response": {
-    // 此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构
+    "field_name": "此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构"
   },
-  "new_bg_introduced": "YES" // 可选值为 "YES" 或 "NO"
+  "new_bg_introduced": "YES"
 }
-```
 '''
 
 mock_tool_user_prompt = '''
@@ -352,7 +345,6 @@ tool_simulation_prompt_with_memory = """
    - "YES" 代表新增的文档/实体/关系须存档；"NO" 代表仅返回已有知识的检索视图。
 
 ### Few-shot 示例（仅供格式与风格参考）
- ```json
 {{
    "tool_response": {{
      "candidates": [
@@ -376,15 +368,13 @@ tool_simulation_prompt_with_memory = """
    }},
    "new_bg_introduced": "NO"
 }}
-```
 
 请严格按照以下 JSON 格式输出结果：
-```json
 {{
   "tool_response": {{
-    // 此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构
+    "field_name": "此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构"
   }},
-  "new_bg_introduced": "YES" // 可选值为 "YES" 或 "NO"
+  "new_bg_introduced": "YES"
 }}
 """
 
@@ -402,15 +392,18 @@ solve_task_system_prompt = """<policy>{restrict}</policy>
 6. **输出最终答案**：信息完备后，基于检索上下文生成回答。
 
 # 工具说明
-系统已通过 <tools></tools> XML 标签提供所有可用 RAG 工具签名：
-<tools>
+系统已提供所有可用 RAG 工具签名（每行一个 JSON 对象）：
 {available_tools}
-</tools>
 
-每一次工具调用，须在 <tool_call></tool_call> XML 标签内返回 JSON：
-<tool_call>
-{{"name": <函数名称>, "arguments": <参数JSON对象>}}
-</tool_call>"""
+每一次回复都必须仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。
+
+可选 action 格式：
+1. 调用工具：
+{{"action":"tool_call","reasoning":"当前处于哪一步、为何选择该工具、期望获得什么信息","tool_call":{{"name":"函数名称","arguments":{{}}}}}}
+2. 向用户澄清：
+{{"action":"ask_user","reasoning":"为什么需要澄清","message":"需要向用户确认的问题"}}
+3. 输出最终答案：
+{{"action":"final_answer","answer":"基于工具检索上下文得到的最终答案"}}"""
 
 solve_task_user_prompt = """用户 Query：{task_info}
 
@@ -422,7 +415,7 @@ solve_task_user_prompt = """用户 Query：{task_info}
 
 2. **迭代检索**：{iteration_requirement} 执行步骤 5 后，若评估工具判定信息不足，须根据缺口建议返回步骤 2 优化 Query 并重新检索，直至上下文足以回答用户 Query（至少 {min_iterations} 轮、至多 {max_iterations_val} 轮迭代补检，若上限为 0 则无需迭代）。
 
-3. 信息完备后输出最终答案，用 <answer></answer> 标签包裹，作为任务结束标识。答案须基于工具检索到的上下文，不得凭空编造知识库中不存在的事实。
+3. 信息完备后输出最终答案，使用 JSON：{{"action":"final_answer","answer":"..."}}。答案须基于工具检索到的上下文，不得凭空编造知识库中不存在的事实。
 
 4. 用户提供的信息可能存在缺失。调用工具前，若**任何必填参数不确定、缺失或含义模糊**，**须先向用户询问确认**，严禁自行猜测或编造参数。
 
@@ -430,7 +423,7 @@ solve_task_user_prompt = """用户 Query：{task_info}
 """
 
 plan_trajectory_system_prompt = '''
-You are a planning agent for an Agentic RAG LangGraph pipeline. Create a complete tool-use trajectory before execution. Return only one <plan> XML block containing a JSON array.
+You are a planning agent for an Agentic RAG LangGraph pipeline. Create a complete tool-use trajectory before execution. Return only one valid JSON object with a `plan` array.
 '''
 
 plan_trajectory_user_prompt = """User query:
@@ -462,13 +455,11 @@ Plan requirements:
 5. Do not generate the final answer and do not call tools.
 6. For every plan step, `arguments` MUST include every key listed in that tool's `parameters.required`. If a value comes from the user query or a prior step, use a concrete placeholder string (e.g. "user query from task", "optimized queries from step 1")—never leave `arguments` as {{}} when required fields exist.
 
-Return format:
-<plan>
-[{{"step_id":1,"stage":"query_optimization","tool_name":"Query_Rewriter","arguments":{{"query":"user query from task"}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"query":"fuzzy_task"}}}}]
-</plan>"""
+Return only this JSON object shape, with no Markdown fences and no text outside JSON:
+{{"plan":[{{"step_id":1,"stage":"query_optimization","tool_name":"Query_Rewriter","arguments":{{"query":"user query from task"}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"query":"fuzzy_task"}}}}]}}"""
 
 plan_evaluation_system_prompt = '''
-You are an evaluator for a planned Agentic RAG tool trajectory. Mark a plan invalid only when it would fail execution, violate policy, omit a necessary RAG stage when matching tools exist, or select clearly useless distractor tools. Return only one <plan_evaluation> XML block containing a JSON object.
+You are an evaluator for a planned Agentic RAG tool trajectory. Mark a plan invalid only when it would fail execution, violate policy, omit a necessary RAG stage when matching tools exist, or select clearly useless distractor tools. Return only one valid JSON object.
 '''
 
 plan_evaluation_user_prompt = """User query:
@@ -498,10 +489,8 @@ Mark `is_valid=true` but still list non-blocking `issues` and `revision_suggesti
 
 Whether valid or invalid, give concrete reasons.
 
-Return format:
-<plan_evaluation>
-{{"is_valid": true, "reasons": ["..."], "issues": [], "revision_suggestions": []}}
-</plan_evaluation>"""
+Return only this JSON object shape, with no Markdown fences and no text outside JSON:
+{{"is_valid": true, "reasons": ["..."], "issues": [], "revision_suggestions": []}}"""
 
 execute_plan_preapproved_prompt = """## Pre-approved execution plan
 The planner and evaluator have already selected the following trajectory. During execution, follow this plan and do not invent extra tool calls unless the plan is exhausted and the accumulated evidence is still insufficient.
@@ -514,13 +503,16 @@ execute_plan_evidence_section_prompt = """
 
 execute_plan_final_answer_prompt = (
     "The planned tool trajectory has completed. Use only the accumulated tool responses and "
-    "the task context to produce the final answer. Return the answer wrapped in <answer></answer>. "
-    "If evidence is insufficient, briefly state the missing evidence instead of inventing facts."
+    "the task context to produce the final answer. Return only JSON: "
+    "{\"action\":\"final_answer\",\"answer\":\"...\"}. "
+    "If evidence is insufficient, return JSON: "
+    "{\"action\":\"ask_user\",\"reasoning\":\"evidence is insufficient\",\"message\":\"missing evidence: ...\"} "
+    "instead of inventing facts."
 )
 
 planned_tool_message_template = """Executing planned step {step_id}: {purpose}
 Stage: {stage}
-<tool_call>{tool_call}</tool_call>"""
+Tool call JSON: {tool_call}"""
 
 rubric_prompt = """
 你是一名专业的 Agentic RAG 系统评测专家，专攻 RAG 流水线工具调用与检索问答任务的完成质量评估。
@@ -530,7 +522,7 @@ rubric_prompt = """
 2. 结合评测结果，为当前任务制定详尽、具备通用性的评分细则
 3. 依据评分细则对每份方案进行评判，给出清晰结论并选出最优方案
 
-**重要要求**：输出内容必须严格遵循指定 XML 标签格式，方便后续解析与存储。
+**重要要求**：输出内容必须是单一合法 JSON 对象，方便后续解析与存储。不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。
 """
 
 rubric_user_prompt = """# 任务说明（用户 Query）
@@ -563,10 +555,10 @@ Query 输入 → 检索前优化 → 检索 → 检索后优化 → 相关性评
 ---
 
 # 你的评测任务
-请按照以下步骤完成评测，**全程严格使用指定 XML 标签包裹各板块内容**：
+请按照以下步骤完成评测，并把各板块内容写入最终 JSON 对象对应字段：
 
 ## 步骤1：流程匹配度校验
-将流程匹配分析内容放置在 <alignment_check></alignment_check> 标签内部。
+将流程匹配分析内容写入 `alignment_check` 字段。
 
 评估所有待评测方案与预设 Agentic RAG 流程的整体契合度：
 - 是否覆盖检索前优化、检索、检索后优化、相关性评估等关键阶段
@@ -583,7 +575,7 @@ Query 输入 → 检索前优化 → 检索 → 检索后优化 → 相关性评
 ---
 
 ## 步骤2：有效方案对比分析
-将对比分析内容放置在 <reasoning></reasoning> 标签内部。
+将对比分析内容写入 `reasoning` 字段。
 
 **仅对步骤1判定为「保留」的方案展开分析**。
 
@@ -603,7 +595,7 @@ Query 输入 → 检索前优化 → 检索 → 检索后优化 → 相关性评
 ## 步骤3：制定评测评分细则
 （仅定义评判标准，本环节不打分）
 
-将所有评分细则放置在 <rubrics></rubrics> 标签内部。
+将所有评分细则写入 `rubrics` 字段。
 
 细则分为以下四大板块整理：
 
@@ -633,39 +625,25 @@ Query 输入 → 检索前优化 → 检索 → 检索后优化 → 相关性评
 ---
 
 ## 步骤4：输出最终评测结论
-将最终结论放置在 <final></final> 标签内部。
+将最终结论写入 `final` 字段。
 
 结合评分细则，对所有有效方案做**定性对比**：
 - 规范合规性、流水线完成度、检索质量、用户交互
 
 随后选出最优方案并说明理由。
 
-最后仅输出最优方案文件名：
-<best_solution>
-solution_x.json
-</best_solution>
+最后将最优方案文件名写入 `best_solution` 字段，例如 `"solution_x.json"`。
 
 ---
 
 # 输出格式硬性要求
-<alignment_check>
-[各方案流程匹配分析，附带保留/舍弃判定]
-</alignment_check>
-
-<reasoning>
-[仅针对判定为保留的方案做对比分析，使用 Markdown 排版]
-</reasoning>
-
-<rubrics>
-[评分细则四大模块：1.规范合规 2.流水线完成度 3.检索质量与忠实度 4.用户交互]
-</rubrics>
-
-<final>
-[有效方案定性对比，以及最优方案选择说明]
-</final>
-
-<best_solution>
-[最优方案对应的文件名]
-</best_solution>
+仅输出一个合法 JSON 对象：
+{{
+  "alignment_check": "各方案流程匹配分析，附带保留/舍弃判定",
+  "reasoning": "仅针对判定为保留的方案做对比分析，可使用 Markdown 排版文本",
+  "rubrics": "评分细则四大模块：1.规范合规 2.流水线完成度 3.检索质量与忠实度 4.用户交互",
+  "final": "有效方案定性对比，以及最优方案选择说明",
+  "best_solution": "solution_x.json"
+}}
 
 现在开始执行评测。"""

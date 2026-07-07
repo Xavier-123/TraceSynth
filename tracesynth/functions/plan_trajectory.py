@@ -1,10 +1,9 @@
 import json
 import logging
-import re
 from typing import Any, Dict, List
 
 from tracesynth.configuration import SynthesisComplexity
-from tracesynth.functions.call_llms import ParseError
+from tracesynth.functions.call_llms import ParseError, parse_json_object
 from tracesynth.functions.prompt import (
     plan_trajectory_system_prompt,
     plan_trajectory_user_prompt,
@@ -14,20 +13,15 @@ from tracesynth.graph.node_utils import AgentState
 logger = logging.getLogger(__name__)
 
 
-def _extract_xml_json(content: str, tag: str) -> Any:
-    matches = re.findall(rf"<{tag}>(.+?)</{tag}>", content or "", re.DOTALL)
-    if not matches:
-        raise ParseError(f"missing <{tag}> tag")
-    # LLM 可能先输出草稿再自我修正，最后一个同名 XML 标签通常才是有效结果。
-    raw_json = matches[-1].strip()
-    try:
-        return json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise ParseError(f"invalid JSON in <{tag}>: {exc}") from exc
+def _extract_json_field(content: str, field: str) -> Any:
+    payload = parse_json_object(content)
+    if field not in payload:
+        raise ParseError(f"missing required JSON field: {field}")
+    return payload[field]
 
 
 def _parse_plan_response(content: str) -> List[Dict[str, Any]]:
-    plan = _extract_xml_json(content, "plan")
+    plan = _extract_json_field(content, "plan")
     if not isinstance(plan, list) or not plan:
         raise ParseError("plan must be a non-empty JSON array")
 
@@ -73,7 +67,8 @@ def _build_plan_messages(state: AgentState, complexity: SynthesisComplexity) -> 
     ]
 
 
-extract_xml_json = _extract_xml_json
+extract_xml_json = _extract_json_field
+extract_json_field = _extract_json_field
 parse_plan_response = _parse_plan_response
 tools_for_prompt = _tools_for_prompt
 build_plan_messages = _build_plan_messages

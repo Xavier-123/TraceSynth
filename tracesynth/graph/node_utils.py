@@ -74,7 +74,7 @@ class AgentState(TypedDict):
     active_plan_revision: int
 
     # 虚拟世界的工具调用记忆；仅当工具返回引入新背景时追加，后续 MockTool/重规划会复用它。
-    tool_call_history: List[str]
+    tool_call_history: List[Any]
 
     # 当前待执行的工具调用 JSON 字符串；路由到 MockTool 后由它读取，终止/重规划时可为空。
     current_tool_call: str
@@ -88,7 +88,7 @@ class AgentState(TypedDict):
     # 工具调用纠错重试计数；保留给非法 tool_call 自纠错/兼容旧流程，目前初始化后未在主流程中递增。
     tool_call_retry_count: int
 
-    # Solver/ExecutePlan 已推进的轮次数；用于业务层最大轮次保护，避免图循环长期不产出 <answer>。
+    # Solver/ExecutePlan 已推进的轮次数；用于业务层最大轮次保护，避免图循环长期不产出终答。
     solver_turn_count: int
 
 
@@ -107,12 +107,23 @@ def is_non_empty_text(value: Any) -> bool:
 def has_final_answer(solve_history: Any) -> bool:
     if not isinstance(solve_history, list):
         return False
-    return any(
-        isinstance(message, dict)
-        and message.get("role") == "assistant"
-        and re.search(r"<answer>.*?</answer>", message.get("content") or "", re.DOTALL | re.IGNORECASE)
-        for message in solve_history
-    )
+    for message in solve_history:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content") or ""
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("action") == "final_answer"
+            and isinstance(payload.get("answer"), str)
+        ):
+            return True
+        if re.search(r"<answer>.*?</answer>", content, re.DOTALL | re.IGNORECASE):
+            return True
+    return False
 
 
 def normalize_tool_for_solver(tool: Dict[str, Any]) -> Dict[str, Any]:
@@ -150,7 +161,7 @@ def validate_tool_call(tool_call: str, checked_tools: List[Dict[str, Any]]) -> t
 
 def is_successful_final_state(final_state: Dict[str, Any], strict=True) -> bool:
     if strict:
-        # 严格模式用于落盘前验收：必须未中断、工具集有效，并且轨迹里真的出现最终答案标签。
+        # 严格模式用于落盘前验收：必须未中断、工具集有效，并且轨迹里真的出现最终答案。
         return (
             not final_state.get("breaked")
             and isinstance(final_state.get("checked_tools"), list)
@@ -327,13 +338,17 @@ def apply_mock_tool_response(
 
     tool_response_message = {
         "role": "tool",
-        "content": f"<tool_response>{tool_response}</tool_response>",
+        "content": json.dumps({"tool_response": tool_response}, ensure_ascii=False),
     }
     new_solve_history = state["solve_history"] + [tool_response_message]
     new_tool_call_history = tool_call_history
     if new_bg_introduced:
+        try:
+            parsed_tool_call: Any = json.loads(tool_call)
+        except (TypeError, json.JSONDecodeError):
+            parsed_tool_call = tool_call
         new_tool_call_history = tool_call_history + [
-            f"Query:\n{tool_call}, Response:\n{tool_response}"
+            {"query": parsed_tool_call, "response": tool_response}
         ]
 
     update: Dict[str, Any] = {

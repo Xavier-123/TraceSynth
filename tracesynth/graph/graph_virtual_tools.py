@@ -181,6 +181,7 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
         _build_plan_messages(state, complexity),
         _parse_plan_response,
         step_name="PlanTrajectoryAgent",
+        json_mode=True,
     )
     if plan is None:
         return build_failure(
@@ -230,6 +231,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
             build_plan_evaluation_messages(state),
             parse_plan_evaluation_response,
             step_name="EvaluatePlanAgent",
+            json_mode=True,
         )
         if evaluation is None:
             PlanEvaluationStats.record("parse_failure")
@@ -290,7 +292,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
     if solver_turn_count > max_solver_turns:
         # Solver 回合上限是业务层停止条件，优先于 LangGraph 递归错误暴露更明确的失败原因。
         return build_failure(
-            f"ExecutePlanAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
+            f"ExecutePlanAgent exceeded max_solver_turns={max_solver_turns} without producing final_answer",
             **{
                 "solve_history": state.get("solve_history", []),
                 "tool_call_history": state.get("tool_call_history", []),
@@ -546,7 +548,7 @@ def run_agent(seed_info: dict, run_config: dict = None):
         skip=skip_label_match,
     )
     if label_check["label_match_status"] in {"mismatch", "missing_answer"}:
-        # P0 标签校验放在成功状态之后，确保落盘轨迹不仅有答案，而且答案与金标一致。
+        # P0 标签校验放在成功状态之后，确保落盘轨迹不仅有终答，而且答案与金标一致。
         failure_reason = (
             "predicted answer is missing"
             if label_check["label_match_status"] == "missing_answer"

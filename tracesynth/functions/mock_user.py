@@ -1,14 +1,15 @@
 import json
-import re
-from .call_llms import ParseError, call_and_parse
+
+from .call_llms import ParseError, call_and_parse, parse_json_object
 from .prompt import mock_user_prompt
 
 
 def _parse_mock_user_response(content: str) -> str:
-    user_response_matches = re.findall(r"<reply>(.+?)</reply>", content, re.DOTALL)
-    if not user_response_matches:
-        raise ParseError("missing <reply> tag")
-    return user_response_matches[-1].strip()
+    payload = parse_json_object(content)
+    reply = payload.get("reply")
+    if not isinstance(reply, str) or not reply.strip():
+        raise ParseError("missing required JSON field: reply")
+    return reply.strip()
 
 
 def mock_user_response(cfg, task, background, restrict, interaction):
@@ -27,5 +28,6 @@ def mock_user_response(cfg, task, background, restrict, interaction):
         messages,
         _parse_mock_user_response,
         step_name="MockUserAgent",
+        json_mode=True,
     )
     return parsed

@@ -97,6 +97,9 @@ def test_all_prompts_format():
         ("planned_tool_message_template", prompt.planned_tool_message_template),
         ("rubric_user_prompt", prompt.rubric_user_prompt),
     ]:
+        if name == "execute_plan_final_answer_prompt":
+            assert '"action":"final_answer"' in text
+            continue
         text.format(**vars_)
 
 

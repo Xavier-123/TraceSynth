@@ -37,9 +37,9 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
     solver_turn_count = int(state.get("solver_turn_count", 0) or 0) + 1
     max_solver_turns = get_solver_max_turns(config)
     if solver_turn_count > max_solver_turns:
-        # Reason-Act 复采样也需要业务层回合上限，避免模型长期不输出 <answer>。
+        # Reason-Act 复采样也需要业务层回合上限，避免模型长期不输出终答。
         return build_failure(
-            f"SolveAgent exceeded max_solver_turns={max_solver_turns} without producing <answer>",
+            f"SolveAgent exceeded max_solver_turns={max_solver_turns} without producing final_answer",
             solve_history=state.get("solve_history", []),
             tool_call_history=state.get("tool_call_history", []),
             solver_turn_count=solver_turn_count,
@@ -64,22 +64,21 @@ def solve_task_node(state: AgentState, config: RunnableConfig):
 
 You may call one or more functions to assist with the user query.
 
-You are provided with function signatures within <tools></tools> XML tags:
-<tools>
+You are provided with function signatures below, one JSON object per line:
 {available_tools}
-</tools>
 
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{{"name": <function-name>, "arguments": <args-json-object>}}
-</tool_call>"""
+Every response MUST be a single valid JSON object with no Markdown fence and no text outside JSON.
+Use one of these shapes:
+{{"action":"tool_call","reasoning":"why this tool is needed","tool_call":{{"name":"function-name","arguments":{{}}}}}}
+{{"action":"ask_user","reasoning":"why clarification is needed","message":"question to the user"}}
+{{"action":"final_answer","answer":"answer grounded in tool evidence"}}"""
         system_prompt = system_prompt.format(available_tools=tools_description, restrict=restrict)
         prompt = f"""Task Description: {task_info}.
 
 ### Requirements:
 1. Please call only one tool at a time, and you must provide your brief reasoning process before using any tool. You can not just give a tool call without providing your reasoning process.
 
-2. Once the task is complete, output the final answer, wrapping the answer in `<answer></answer>` as a termination signal. 
+2. Once the task is complete, output the final answer as JSON: {{"action":"final_answer","answer":"..."}}.
 
 3. IMPORTANT: The user most likely provided insufficient information, you are encouraged to interact with the user to gather more information if needed. Before calling any tool, if **any required parameter is uncertain, missing, ambiguous, or not explicitly provided by the user**, you **MUST ask the user for clarification first**. Do NOT guess or fabricate parameters!!!
 """
@@ -91,9 +90,17 @@ For each function call, return a json object with function name and arguments wi
         solve_history = list(state["solve_history"])
 
     one_step_think_and_tool_call, tool_call_info = solve_task_by_tools(cfg, solve_history)
+    if not isinstance(one_step_think_and_tool_call, str) or not one_step_think_and_tool_call.strip():
+        return build_failure(
+            "SolveAgent returned no valid JSON action after parse retries",
+            solve_history=solve_history,
+            tool_call_history=state.get("tool_call_history", []),
+            solver_turn_count=solver_turn_count,
+        )
     solve_history = solve_history + [{"role": "assistant", "content": one_step_think_and_tool_call}]
 
-    if "<answer>" not in one_step_think_and_tool_call:
+    action_payload = json.loads(one_step_think_and_tool_call)
+    if action_payload.get("action") != "final_answer":
         if tool_call_info is None:
             # 没有答案也没有工具调用，说明 Solver 需要向模拟用户追问缺失信息。
             task_finished = "Transfer to user"
@@ -106,8 +113,8 @@ For each function call, return a json object with function name and arguments wi
                     solve_history = solve_history + [{
                         "role": "user",
                         "content": (
-                            f"Your <tool_call> was invalid: {error}. "
-                            "Please check the tool name and required arguments, then try again."
+                            f"Your JSON tool_call action was invalid: {error}. "
+                            "Please check the tool name and required arguments, then return valid JSON."
                         ),
                     }]
                     return {

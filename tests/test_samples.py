@@ -82,9 +82,17 @@ def test_load_seed_records_from_fixture():
 def test_extract_predicted_answer():
     history = [
         {"role": "assistant", "content": "thinking"},
-        {"role": "assistant", "content": "done <answer>最终答案</answer>"},
+        {"role": "assistant", "content": '{"action":"final_answer","answer":"最终答案"}'},
     ]
     assert extract_predicted_answer(history) == "最终答案"
+
+
+def test_extract_predicted_answer_legacy_xml_fallback():
+    history = [
+        {"role": "assistant", "content": "thinking"},
+        {"role": "assistant", "content": "done <answer>旧答案</answer>"},
+    ]
+    assert extract_predicted_answer(history) == "旧答案"
 
 
 def test_check_label_match():
@@ -105,6 +113,7 @@ if __name__ == "__main__":
     test_validate_seed_info_builds_background()
     test_load_seed_records_from_fixture()
     test_extract_predicted_answer()
+    test_extract_predicted_answer_legacy_xml_fallback()
     test_check_label_match()
     test_check_label_mismatch()
     print("All sample schema tests passed")
