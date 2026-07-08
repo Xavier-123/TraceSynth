@@ -49,7 +49,7 @@ def mock_tool_response(
         messages,
         _parse_mock_tool_response,
         step_name="MockToolAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     if parsed is None:
         return None, False

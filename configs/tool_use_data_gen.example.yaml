@@ -106,13 +106,12 @@ input:
   legacy_persona_mode: false
 
 paths:
-  data_file: "../configs/persona_5K.jsonl"
+  data_file: "../data/seed_qa_sample.jsonl"
 
 # Agentic RAG 数据合成复杂度（6 步流程，4 个参数）
 synthesis:
+  paraphrase_supervised_question: true
   task_complexity:
     num_tools: "4~6"
-    num_custom_tools: "1"
-    distractor_tools: "1~2"
   iteration_complexity:
     max_iterations: "1~2"

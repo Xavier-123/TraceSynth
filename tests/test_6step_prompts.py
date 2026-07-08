@@ -50,7 +50,7 @@ def _base_vars():
 def test_to_prompt_vars_keys():
     vars_ = SynthesisComplexity().to_prompt_vars()
     expected = {
-        "num_tools", "num_custom_tools", "distractor_tools",
+        "num_tools",
         "max_iterations", "min_iterations", "max_iterations_val",
         "iteration_requirement", "complexity_summary",
     }

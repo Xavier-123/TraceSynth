@@ -47,7 +47,7 @@ def generate_tool_set(cfg, background_info, complexity=None):
         messages,
         _parse_tool_set_response,
         step_name="ToolSetGenAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     if parsed is None:
         return None, None, None, None, None

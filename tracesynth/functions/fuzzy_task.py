@@ -34,7 +34,7 @@ def generate_fuzzy_task(cfg, initial_task_info, complexity=None):
         messages,
         _parse_fuzzy_task_response,
         step_name="FuzzyTaskAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     if parsed is None:
         return None, None

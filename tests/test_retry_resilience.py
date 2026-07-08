@@ -165,7 +165,7 @@ def test_call_and_parse_json_mode_sets_response_format():
             [{"role": "user", "content": "hi"}],
             _parse_mock_user_response,
             step_name="test",
-            json_mode=True,
+            # json_mode=True,
         )
     assert result == "ok"
     assert captured[0]["llm_params"]["response_format"] == {"type": "json_object"}
@@ -189,7 +189,7 @@ def test_call_and_parse_json_mode_keeps_configured_response_format():
             [{"role": "user", "content": "hi"}],
             _parse_mock_user_response,
             step_name="test",
-            json_mode=True,
+            # json_mode=True,
         )
     assert result == "ok"
     assert captured[0]["llm_params"]["response_format"] == {"type": "text"}

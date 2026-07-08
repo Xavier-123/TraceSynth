@@ -28,6 +28,6 @@ def mock_user_response(cfg, task, background, restrict, interaction):
         messages,
         _parse_mock_user_response,
         step_name="MockUserAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     return parsed

@@ -37,8 +37,6 @@ class SynthesisComplexity(BaseModel):
     """Controls task complexity and iteration complexity for Agentic RAG data synthesis."""
 
     num_tools: str = Field(default="4~6", description="Number of RAG tools to design (>=4 to cover step2~5).")
-    num_custom_tools: str = Field(default="1", description="Number of custom virtual RAG components.")
-    distractor_tools: str = Field(default="1~2", description="Number of distractor tools in tool_check.")
     max_iterations: str = Field(
         default="1~2",
         description="Expected step5 to step2 retrieval iteration rounds in task design and solving.",
@@ -89,8 +87,6 @@ class SynthesisComplexity(BaseModel):
 
         return {
             "num_tools": format_range(self.num_tools, "个"),
-            "num_custom_tools": format_range(self.num_custom_tools, "个"),
-            "distractor_tools": format_range(self.distractor_tools, "个"),
             "max_iterations": format_range(self.max_iterations, "轮"),
             "min_iterations": str(iter_lo),
             "max_iterations_val": str(iter_hi),
@@ -99,8 +95,6 @@ class SynthesisComplexity(BaseModel):
                 f"任务复杂度：设计 {format_range(self.num_tools, '个')} RAG 工具，"
                 f"覆盖全部 4 类工具（检索前优化/检索/检索后优化/评估），"
                 f"对齐 step2~step5 四个必经步骤，"
-                f"含 {format_range(self.num_custom_tools, '个')} 自定义组件、"
-                f"{format_range(self.distractor_tools, '个')} 干扰工具；"
                 f"迭代复杂度：{iteration_note}"
             ),
         }

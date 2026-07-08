@@ -27,8 +27,6 @@ def apply_complexity_cli_overrides(config: Dict[str, Any], args: argparse.Namesp
     # CLI 参数只覆盖合成复杂度相关字段，避免命令行误改模型、路径等运行配置。
     mapping = {
         "num_tools": ("task_complexity", "num_tools"),
-        "num_custom_tools": ("task_complexity", "num_custom_tools"),
-        "distractor_tools": ("task_complexity", "distractor_tools"),
         "max_iterations": ("iteration_complexity", "max_iterations"),
     }
     for arg_name, (section, key) in mapping.items():
@@ -83,8 +81,6 @@ def main():
                        help='Path to the configuration file')
     complexity = parser.add_argument_group('synthesis complexity overrides')
     complexity.add_argument('--num-tools', type=str, help='e.g. "4~6"')
-    complexity.add_argument('--num-custom-tools', type=str, help='e.g. "1"')
-    complexity.add_argument('--distractor-tools', type=str, help='e.g. "1~2"')
     complexity.add_argument('--max-iterations', type=str, help='e.g. "1~2", use "0" for no iteration')
     args = parser.parse_args()
 

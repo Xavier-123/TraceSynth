@@ -181,7 +181,7 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
         _build_plan_messages(state, complexity),
         _parse_plan_response,
         step_name="PlanTrajectoryAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     if plan is None:
         return build_failure(
@@ -231,7 +231,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
             build_plan_evaluation_messages(state),
             parse_plan_evaluation_response,
             step_name="EvaluatePlanAgent",
-            json_mode=True,
+            # json_mode=True,
         )
         if evaluation is None:
             PlanEvaluationStats.record("parse_failure")

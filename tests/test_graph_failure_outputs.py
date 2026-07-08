@@ -21,8 +21,6 @@ def _config(tmp_path: Path):
         "synthesis": {
             "task_complexity": {
                 "num_tools": "4",
-                "num_custom_tools": "1",
-                "distractor_tools": "1",
             },
             "iteration_complexity": {"max_iterations": "1"},
         },

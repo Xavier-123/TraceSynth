@@ -37,6 +37,6 @@ def tool_check(cfg, tool_description, task_description, complexity=None) -> Opti
         messages,
         _parse_checked_tools,
         step_name="ToolCheckAgent",
-        json_mode=True,
+        # json_mode=True,
     )
     return parsed

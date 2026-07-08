@@ -48,7 +48,7 @@ def solve_task_by_tools(cfg, solve_history):
         solve_history,
         _parse_solver_response,
         step_name="FinalLLMResponse",
-        json_mode=True,
+        # json_mode=True,
     )
     if parsed is None:
         return None, None

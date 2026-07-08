@@ -59,7 +59,7 @@ def _config(use_label: bool = True):
             "retry": {"tool_call_max_retries": 3},
             "evaluation": {"use_label_as_answer": use_label},
             "synthesis": {
-                "task_complexity": {"num_tools": "4", "num_custom_tools": "1", "distractor_tools": "1"},
+                "task_complexity": {"num_tools": "4"},
                 "iteration_complexity": {"max_iterations": "1"},
             },
         }
