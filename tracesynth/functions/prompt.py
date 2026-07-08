@@ -102,7 +102,7 @@ fuzzy_task_prompt = """
 ## 本次合成复杂度参数
 {complexity_summary}
 
-输出规范
+## 输出规范
 
 仅输出一个合法 JSON 对象，不得使用 Markdown 代码块，不得在 JSON 外添加解释性文字。顶层字段固定为：
 {{
@@ -116,7 +116,7 @@ background 字段内容须包含：
    - 完成任务所需的前置认知与隐含子目标
    - 信息缺口设计：{iteration_requirement}（首轮检索不应一次凑齐全部答案要素）
 
-4. 任务与背景描述硬性约束
+## 任务与背景描述硬性约束
 - 篇幅不宜冗长、细节不宜堆砌；
 - 严禁明示或暗示须使用哪款 RAG 工具或执行哪一步流水线（本条为核心要求）；
 - 不得直接给出 Agentic RAG 六步执行流程；
@@ -177,6 +177,91 @@ tool_check_prompt = """
 
 任务描述（用户 Query）：{task_description}
 原始工具说明：{tool_description}
+"""
+
+plan_trajectory_system_prompt = '''
+你是面向基于 LangGraph 构建的智能体检索增强生成（Agentic RAG）流水线的规划智能体。在正式执行前生成一套完整的工具调用执行轨迹。仅返回一个合法 JSON 对象，内部包含plan数组。
+'''
+
+plan_trajectory_user_prompt = """
+## 用户提问：
+{fuzzy_task}
+
+## 任务背景：
+{task_background}
+
+## 整体顶层流程：
+{initial_workflow}
+
+## 合规约束规则：
+{restrict}
+
+## 任务复杂度说明：
+{complexity_summary}
+
+## 可用工具 JSON 列表：
+{available_tools}
+
+## 历史评估结果（如有）：
+{prior_evaluation}
+
+## 方案编写要求：
+- 仅从可用工具清单中选用有效工具，禁止选用无意义干扰工具。
+- 若存在对应配套工具，必须完整覆盖智能体检索增强生成全流程：步骤 2 查询优化、步骤 3 知识库检索、步骤 4 检索结果后处理、步骤 5 内容充足度 / 相关性评估。
+- 必须写明清晰的步骤依赖关系与参数数据来源。
+- 若任务需要多轮迭代检索，需在迭代次数限制内增加由评估结果驱动的后续执行步骤。
+- 禁止生成最终回答，也禁止实际调用工具。
+- 方案中每一个执行步骤的arguments（入参）必须包含该工具parameters.required下所有必填字段。若参数取值来自用户提问或前置步骤，使用明确占位文本（例如 “用户原始提问”、“步骤 1 输出的优化查询”）；存在必填项时，绝不允许arguments为空对象{}。
+- 仅输出指定格式 JSON 对象，禁止使用 Markdown 代码块，JSON 外部不得附带任何文字内容：
+{{
+    "plan":[
+        {{
+            "step_id":1,
+            "stage":"query_optimization",
+            "tool_name":"Query_Rewriter",
+            "arguments":{{"query":"user query from task"}},
+            "purpose":"该步骤的执行作用",
+            "depends_on":[],
+            "parameter_sources":{{"query":"fuzzy_task"}}
+        }}
+    ]
+}}
+"""
+
+plan_evaluation_system_prompt = '''
+你是智能体检索增强生成（Agentic RAG）工具调用轨迹的评估员。仅当出现以下情形时判定方案无效：方案无法正常执行、违反合规规则、已有对应工具却缺失检索增强生成的必要流程阶段，或是选用完全无用的干扰工具。仅返回一份合法 JSON 对象。'''
+
+plan_evaluation_user_prompt = """ 用户查询：
+{fuzzy_task}
+
+合规规则 / 限制要求：
+{restrict}
+
+可用工具 JSON 数据：
+{available_tools}
+
+执行方案 JSON：
+{plan_json}
+
+评估维度：工具调用合法性、必填参数完备性、流程完整覆盖度、依赖关系正确性、规避无效干扰工具、迭代逻辑设计、规则合规性。
+仅出现以下任一情况时，判定 is_valid=false（方案无效）：
+步骤调用了不在可用工具列表中的工具，或是缺少必填入参
+系统已有对应工具，但方案缺少查询优化、检索、后处理、效果评估任一核心环节
+舍弃适用工具，选用无作用的干扰工具处理任务
+方案违反合规限制，或现有内容无法正常执行
+
+出现以下情况时判定 is_valid=true（方案有效），当方案有效时，只需给出 is_valid：
+depends_on（依赖项）、parameter_sources（参数来源）信息不完善，但所有步骤参数均可正常运行
+迭代设计有优化空间，但整套方案在规则内能够正常执行
+步骤顺序、说明文档存在轻微瑕疵
+
+仅输出指定格式 JSON 对象，禁止使用 Markdown 代码块，JSON 外部不能附加任何文字：
+{{
+    "is_valid": false, 
+    "reasons": ["具体理由"], 
+    "issues": [], 
+    "revision_suggestions": ['优化建议']
+}}
 """
 
 mock_user_prompt = """
@@ -293,89 +378,6 @@ mock_tool_user_prompt = '''
 最大支持有效补检轮数：{max_iterations}
 '''
 
-tool_simulation_prompt_with_memory = """
-你是虚拟知识库世界的先知，负责模拟 Agentic RAG 流水线中各工具的调用结果。你知晓虚拟知识库的全部文档、实体关系与索引状态，并能记住此前工具调用确立的检索上下文。
-
-## 本次合成迭代复杂度
-{iteration_requirement}
-
-### 需要你模拟的虚拟 RAG 工具（含各工具功能说明）
-{tools}
-
-### 虚拟知识库状态（历史记忆）
-下方是当前已确定、不可更改的虚拟知识库既定信息（含已召回文档、索引片段、图谱事实等）。该内容由过往工具调用生成，你必须严格遵守，不得否定现有设定，也不能生成矛盾内容：
-{world_state}
-
-### 智能体本次发起的工具调用请求
-{query}
-
-### 隐藏金标（仅供模拟检索结果对齐，勿在工具返回中直接泄露完整标准答案）
-标准答案：{label}
-参考上下文：{context}
-
-### 回复规则
-1. 精准模拟 RAG 工具返回结果
-   - 严格按工具所属流水线阶段生成合理输出：
-     - Query 优化类 → 返回优化后的 Query 列表及策略说明
-     - 召回类 → 返回带 doc_id、片段文本、初始分数的候选文档列表
-     - 检索后优化类 → 返回去重/融合/重排/精炼后的文档列表或结构化上下文
-     - 评估类 → 返回相关性判定、信息缺口描述、是否建议迭代（及优化建议）
-   - 返回格式须匹配工具定义的输出参数结构，并嵌套在 JSON 的 `tool_response` 字段中。
-
-2. 保证与虚拟知识库自洽
-   - 检索结果须来自或符合虚拟知识库中的事实，不可凭空捏造与 world_state 矛盾的文档
-   - 若请求参数与知识库状态冲突，拒绝执行并给出合理说明
-
-3. 支持迭代检索场景
-   - 按迭代复杂度要求模拟：{iteration_requirement}
-   - 首轮召回可故意遗漏部分关键信息，促使智能体在评估阶段发现问题并发起补检
-   - 当智能体按评估建议优化 Query 后再次检索，应返回补充性的相关片段；最多支持 {max_iterations} 轮有效补检
-
-4. 仅输出 JSON 格式
-   - 必须仅输出一个合法的 JSON 对象，不得在 JSON 之外附加任何解释性文字或旁白。
-   - tool_response 和 new_bg_introduced 两个字段同级
-
-5. 上下文长度控制
-   - 单次返回的文档片段总数与单段长度须适中：足够支撑推理，但避免过长。
-
-6. 标注是否新增知识库设定
-   - 在 JSON 的 `new_bg_introduced` 字段中标注本次是否新增永久事实："YES" 或 "NO"。
-   - "YES" 代表新增的文档/实体/关系须存档；"NO" 代表仅返回已有知识的检索视图。
-
-### Few-shot 示例（仅供格式与风格参考）
-{{
-   "tool_response": {{
-     "candidates": [
-       {{
-         "doc_id": "doc_001",
-         "text": "梯度下降是一种一阶迭代优化算法，用于寻找可微函数的局部最小值",
-         "score": 0.92
-       }},
-       {{
-         "doc_id": "doc_002",
-         "text": "随机梯度下降（SGD）每次使用一个样本来更新参数",
-         "score": 0.78
-       }},
-       {{
-         "doc_id": "doc_003",
-         "text": "动量法通过积累历史梯度来加速收敛",
-         "score": 0.65
-       }}
-     ],
-     "retrieval_strategy": "dense_vector_similarity"
-   }},
-   "new_bg_introduced": "NO"
-}}
-
-请严格按照以下 JSON 格式输出结果：
-{{
-  "tool_response": {{
-    "field_name": "此处填写模拟后的工具返回内容，格式需匹配对应工具定义的输出参数结构"
-  }},
-  "new_bg_introduced": "YES"
-}}
-"""
-
 solve_task_system_prompt = """<policy>{restrict}</policy>
 
 # 角色
@@ -420,76 +422,6 @@ solve_task_user_prompt = """用户 Query：{task_info}
 5. 严格遵守 <policy> 中的工具调用约束，违规将导致任务失败。
 """
 
-plan_trajectory_system_prompt = '''
-You are a planning agent for an Agentic RAG LangGraph pipeline. Create a complete tool-use trajectory before execution. Return only one valid JSON object with a `plan` array.
-'''
-
-plan_trajectory_user_prompt = """User query:
-{fuzzy_task}
-
-Task background:
-{task_background}
-
-High-level workflow:
-{initial_workflow}
-
-Policy/restrictions:
-{restrict}
-
-Complexity:
-{complexity_summary}
-
-Available tools JSON:
-{available_tools}
-
-Previous evaluation, if any:
-{prior_evaluation}
-
-Plan requirements:
-1. Select only useful tools from the available tool list and avoid distractor tools.
-2. Cover Agentic RAG step2 query optimization, step3 retrieval, step4 post-processing, and step5 sufficiency/relevance evaluation whenever matching tools exist.
-3. Include explicit step dependencies and parameter sources.
-4. If iterative retrieval may be needed, include evaluation-driven follow-up steps within the bounded iteration requirement.
-5. Do not generate the final answer and do not call tools.
-6. For every plan step, `arguments` MUST include every key listed in that tool's `parameters.required`. If a value comes from the user query or a prior step, use a concrete placeholder string (e.g. "user query from task", "optimized queries from step 1")—never leave `arguments` as {{}} when required fields exist.
-
-Return only this JSON object shape, with no Markdown fences and no text outside JSON:
-{{"plan":[{{"step_id":1,"stage":"query_optimization","tool_name":"Query_Rewriter","arguments":{{"query":"user query from task"}},"purpose":"why this step is needed","depends_on":[],"parameter_sources":{{"query":"fuzzy_task"}}}}]}}"""
-
-plan_evaluation_system_prompt = '''
-You are an evaluator for a planned Agentic RAG tool trajectory. Mark a plan invalid only when it would fail execution, violate policy, omit a necessary RAG stage when matching tools exist, or select clearly useless distractor tools. Return only one valid JSON object.
-'''
-
-plan_evaluation_user_prompt = """User query:
-{fuzzy_task}
-
-Policy/restrictions:
-{restrict}
-
-Available tools JSON:
-{available_tools}
-
-Plan JSON:
-{plan_json}
-
-Evaluate tool legality, required parameters, process coverage, dependency correctness, distractor-tool avoidance, iteration design, and policy compliance.
-
-Mark `is_valid=false` ONLY when:
-- A step references a tool not in the available list, or required arguments are missing
-- The plan cannot cover query optimization, retrieval, post-processing, or evaluation when matching tools exist
-- A distractor tool is chosen instead of a useful tool for the task
-- The plan violates policy/restrictions or cannot be executed as written
-
-Mark `is_valid=true` but still list non-blocking `issues` and `revision_suggestions` when:
-- `depends_on` or `parameter_sources` are incomplete yet every step has executable arguments
-- Iteration design could be improved but the plan is runnable within bounds
-- Minor ordering or documentation gaps remain
-
-Whether valid or invalid, give concrete reasons.
-
-Return only this JSON object shape, with no Markdown fences and no text outside JSON:
-{{"is_valid": true, "reasons": ["..."], "issues": [], "revision_suggestions": []}}"""
-
 execute_plan_preapproved_prompt = """## Pre-approved execution plan
 The planner and evaluator have already selected the following trajectory. During execution, follow this plan and do not invent extra tool calls unless the plan is exhausted and the accumulated evidence is still insufficient.
 {plan_json}{evidence_section}"""
@@ -499,14 +431,20 @@ execute_plan_evidence_section_prompt = """
 ## Evidence already gathered before this plan revision
 {evidence_json}"""
 
-execute_plan_final_answer_prompt = (
-    "The planned tool trajectory has completed. Use only the accumulated tool responses and "
-    "the task context to produce the final answer. Return only JSON: "
-    "{\"action\":\"final_answer\",\"answer\":\"...\"}. "
-    "If evidence is insufficient, return JSON: "
-    "{\"action\":\"ask_user\",\"reasoning\":\"evidence is insufficient\",\"message\":\"missing evidence: ...\"} "
-    "instead of inventing facts."
-)
+execute_plan_final_answer_prompt = '''
+规划好的工具调用流程已全部执行完毕。仅依靠所有工具返回的汇总结果与任务上下文生成最终回答。仅输出如下JSON格式内容：
+{{
+    "action": "final_answer",
+    "answer": "填写最终回答内容"
+}}
+
+若现有佐证信息不足，禁止编造信息，改为返回以下JSON：
+{{
+    "action": "ask_user",
+    "reasoning": "现有佐证材料不足",
+    "message": "missing evidence：……"
+}}
+'''
 
 planned_tool_message_template = """Executing planned step {step_id}: {purpose}
 Stage: {stage}

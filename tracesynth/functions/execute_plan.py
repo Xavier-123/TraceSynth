@@ -90,6 +90,7 @@ def _insufficient_evidence_outcome(
     solver_turn_count: int,
     *,
     extra_reason: str = "",
+    missing_evidence_message: str = "",
 ) -> Dict[str, Any]:
     """证据不足时：未超修订上限则重规划，否则判定失败。"""
     max_revisions = get_plan_max_revisions(config)
@@ -97,16 +98,25 @@ def _insufficient_evidence_outcome(
     reasons = ["The completed plan did not provide enough evidence for the final answer."]
     if extra_reason:
         reasons.append(extra_reason)
+    if missing_evidence_message:
+        reasons.append(f"Final Response reported missing evidence: {missing_evidence_message}")
+    revision_suggestions = [
+        "Revise the plan to include the missing evidence-gathering step before final answering."
+    ]
+    if missing_evidence_message:
+        revision_suggestions.append(
+            f"Add or revise tool steps to collect this missing evidence: {missing_evidence_message}"
+        )
     plan_evaluation = {
         "is_valid": False,
         "reasons": reasons,
         "issues": [
             "Final Response requested an additional tool call after executing all planned steps."
         ],
-        "revision_suggestions": [
-            "Revise the plan to include the missing evidence-gathering step before final answering."
-        ],
+        "revision_suggestions": revision_suggestions,
     }
+    if missing_evidence_message:
+        plan_evaluation["missing_evidence"] = missing_evidence_message
     if revision_count >= max_revisions:
         return build_failure(
             "plan exhausted but evidence still insufficient after max revisions",
@@ -193,12 +203,16 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         }
 
     if action_payload.get("action") in {"tool_call", "ask_user"} or tool_call_info is not None:
+        missing_evidence_message = ""
+        if action_payload.get("action") == "ask_user":
+            missing_evidence_message = str(action_payload.get("message", "")).strip()
         return _insufficient_evidence_outcome(
             state,
             config,
             solve_history,
             solver_turn_count,
             extra_reason=f"Final Response returned action={action_payload.get('action')!r} instead of final_answer.",
+            missing_evidence_message=missing_evidence_message,
         )
 
     return build_failure(
