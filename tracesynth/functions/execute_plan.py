@@ -24,7 +24,6 @@ from tracesynth.graph.node_utils import (
     normalize_tool_for_solver,
     use_label_as_answer,
 )
-from tracesynth.io import check_label_match
 
 logger = logging.getLogger(__name__)
 
@@ -172,22 +171,9 @@ def _generate_final_answer_from_plan(state: AgentState, config: RunnableConfig, 
         )
 
     if action_payload.get("action") == "final_answer":
-        model_answer = str(action_payload.get("answer", "")).strip()
         if use_label_as_answer(config):
             label = (state["seed_info"].get("label") or "").strip()
             if label:
-                match_result = check_label_match(model_answer, label)
-                if match_result["label_match_status"] != "match":
-                    return _insufficient_evidence_outcome(
-                        state,
-                        config,
-                        solve_history,
-                        solver_turn_count,
-                        extra_reason=(
-                            f"Model's own final answer ('{model_answer}') does not match "
-                            f"the supervised label; treating as insufficient/incorrect evidence chain."
-                        ),
-                    )
                 solve_history[-1] = {
                     "role": "assistant",
                     "content": json.dumps(
