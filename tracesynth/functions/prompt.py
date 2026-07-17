@@ -184,6 +184,27 @@ tool_check_prompt = """
 原始工具说明：{tool_description}
 """
 
+fixed_tool_set_prompt = """你是一名 Agentic RAG 数据合成场景设计专家。
+
+系统已经提供以下固定工具目录。你只能基于这些工具设计任务和工作流，严禁创建、改名、修改或追加任何工具：
+{available_tools}
+
+背景信息：{background_info}
+
+迭代要求：{iteration_requirement}
+
+请设计一个需要 Query 优化、检索、证据后处理、答案生成和答案评估的任务。工作流必须说明：
+1. 从固定目录选择合适工具，不能发明工具；
+2. generate_answer 在证据后处理之后执行；
+3. critique_answer 在 generate_answer 之后执行；
+4. critique_answer 不通过时，根据反馈返回 Query 优化和检索阶段。
+
+严格输出以下三个区块。不要输出 <tools>；即使输出也会被系统忽略。
+<task>用户 Query 场景及知识库背景描述</task>
+<restriction>针对固定目录中某个工具的、清晰可校验的使用限制</restriction>
+<workflow>使用固定工具目录的高层执行流程及评估失败后的迭代回路</workflow>
+"""
+
 mock_user_prompt = """
 你扮演一名向 Agentic RAG 系统提交检索/问答请求的真实用户，需要解决以下问题：
 {task}
@@ -430,7 +451,7 @@ solve_task_user_prompt = """用户 Query：{task_info}
 """
 
 plan_trajectory_system_prompt = '''
-You are a planning agent for an Agentic RAG LangGraph pipeline. Create a complete tool-use trajectory before execution. Return only one <plan> XML block containing a JSON array.
+你是一套智能检索增强生成（Agentic RAG）LangGraph 流程的规划智能体，请在正式执行前生成完整的工具调用执行链路。仅返回一个包含 JSON 数组的 <plan> XML 标签块。
 '''
 
 plan_trajectory_user_prompt = """User query:

@@ -68,14 +68,15 @@ def _build_plan_messages(state: AgentState, complexity: SynthesisComplexity) -> 
                 complexity_summary=complexity.to_prompt_vars()["complexity_summary"],
                 available_tools=_tools_for_prompt(state["checked_tools"]),
                 prior_evaluation=json.dumps(prior_evaluation, ensure_ascii=False),
+            ) + (
+                "\n\nFixed-catalog requirements:\n"
+                "- Use only the exact tools in Available tools JSON.\n"
+                "- Include query optimization, retrieval, and post-retrieval steps.\n"
+                "- End with exactly one generate_answer followed immediately by exactly one "
+                "critique_answer. critique_answer must be the final tool step.\n"
+                "- If prior critique failed, revise the retrieval path using its feedback."
             ),
         },
     ]
-
-
-extract_xml_json = _extract_xml_json
-parse_plan_response = _parse_plan_response
-tools_for_prompt = _tools_for_prompt
-build_plan_messages = _build_plan_messages
 
 

@@ -96,11 +96,8 @@ class SynthesisComplexity(BaseModel):
             "max_iterations_val": str(iter_hi),
             "iteration_requirement": iteration_note,
             "complexity_summary": (
-                f"任务复杂度：设计 {format_range(self.num_tools, '个')} RAG 工具，"
-                f"覆盖全部 4 类工具（检索前优化/检索/检索后优化/评估），"
-                f"对齐 step2~step5 四个必经步骤，"
-                f"含 {format_range(self.num_custom_tools, '个')} 自定义组件、"
-                f"{format_range(self.distractor_tools, '个')} 干扰工具；"
+                "任务复杂度：只能从系统提供的固定 RAG 工具目录中选择工具，"
+                "须覆盖检索前优化、检索、检索后优化、答案生成与答案评估闭环；"
                 f"迭代复杂度：{iteration_note}"
             ),
         }

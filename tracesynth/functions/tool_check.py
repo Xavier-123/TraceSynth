@@ -1,9 +1,9 @@
 import json
 import re
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
-from .call_llms import ParseError, call_and_parse
-from .prompt import tool_check_prompt
+from .call_llms import ParseError
 
 
 def _parse_checked_tools(content: str) -> List[Dict[str, Any]]:
@@ -29,23 +29,18 @@ def _parse_checked_tools(content: str) -> List[Dict[str, Any]]:
     return checked_tools
 
 
-def tool_check(cfg, tool_description, task_description, complexity=None) -> Optional[List[Dict[str, Any]]]:
-    from tracesynth.configuration import SynthesisComplexity
-    if complexity is None:
-        complexity = SynthesisComplexity()
-    prompt = tool_check_prompt.format(
-        task_description=task_description,
-        tool_description=tool_description,
-        **complexity.to_prompt_vars(),
-    )
-    messages = [
-        {"role": "system", "content": ""},
-        {"role": "user", "content": prompt},
-    ]
-    parsed, _ = call_and_parse(
-        cfg,
-        messages,
-        _parse_checked_tools,
-        step_name="ToolCheckAgent",
-    )
-    return parsed
+def tool_check(
+    cfg,
+    tool_description,
+    task_description,
+    complexity=None,
+    canonical_tools=None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Deterministically accept only the canonical catalog."""
+    del cfg, task_description, complexity
+    if canonical_tools is None:
+        raise ValueError("canonical_tools is required")
+    parsed = _parse_checked_tools(f"<tools>{tool_description}</tools>")
+    if parsed != canonical_tools:
+        raise ParseError("tool set differs from the canonical fixed catalog")
+    return deepcopy(canonical_tools)

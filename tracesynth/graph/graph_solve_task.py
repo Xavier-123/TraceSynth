@@ -4,11 +4,13 @@ import yaml
 import glob
 import re
 import threading
+import logging
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 
 from tracesynth.configuration import ModelConfiguration
+from tracesynth.fixed_tools import validate_fixed_tool_catalog
 from tracesynth.functions import (
     mock_tool_response, solve_task_by_tools, mock_user_response
 )
@@ -21,8 +23,14 @@ from tracesynth.graph.node_utils import (
     is_graph_recursion_error,
     validate_tool_call,
 )
+from tracesynth.graph.diagnostics import (
+    failure_from_exception,
+    instrument_node,
+    persist_and_report_failure,
+)
 
 log_file_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 def solve_task_node(state: AgentState, config: RunnableConfig):
     if state["breaked"]:
         return {
@@ -140,13 +148,17 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
             current_tool_call=tool_call,
         )
 
+    serialized_tool_response = json.dumps(tool_response, ensure_ascii=False)
     tool_response_message = {
-        "role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"
+        "role": "tool",
+        "content": f"<tool_response>{serialized_tool_response}</tool_response>",
     }
     solve_history.append(tool_response_message)
     if new_bg_introduced:
         # 只有工具返回引入新背景时才写入记忆，避免无信息调用污染虚拟世界状态。
-        tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")
+        tool_call_history.append(
+            f"Query:\n{tool_call}, Response:\n{serialized_tool_response}"
+        )
     
     return {
         "tool_call_history": tool_call_history,
@@ -187,9 +199,9 @@ def should_call_tool(state: AgentState):
 
 # Build the graph
 builder = StateGraph(AgentState, config_schema=RunnableConfig)
-builder.add_node("reason_and_act", solve_task_node)
-builder.add_node("mock_tools", mock_tools_node)
-builder.add_node("mock_user", mock_user_node)
+builder.add_node("reason_and_act", instrument_node("solve_task", "reason_and_act", solve_task_node))
+builder.add_node("mock_tools", instrument_node("solve_task", "mock_tools", mock_tools_node))
+builder.add_node("mock_user", instrument_node("solve_task", "mock_user", mock_user_node))
 
 builder.set_entry_point("reason_and_act")
 builder.add_conditional_edges(
@@ -203,12 +215,68 @@ graph = builder.compile()
 
 # --- 运行入口 ---
 def run_agent(seed_info: dict, run_config: dict = None):
-    already_processed_path = run_config["logging"]["already_processed_path"]
-    solve_path = run_config["logging"]["solve_path"]
-    solve_path = os.path.join(solve_path, f"{seed_info['id']}")
-    if not os.path.exists(solve_path):
-        os.makedirs(solve_path)
-    repeat_times = int(run_config["logging"]["repeat_times"])
+    run_config = run_config or {}
+    raw_seed_info = dict(seed_info) if isinstance(seed_info, dict) else {}
+    logging_cfg = run_config.get("logging") or {}
+    already_processed_path = logging_cfg.get("already_processed_path")
+    failed_task_path = logging_cfg.get("failed_task_file_path")
+    if not failed_task_path and already_processed_path:
+        failed_task_path = f"{already_processed_path}.failed"
+    solve_root = logging_cfg.get("solve_path")
+    task_id = raw_seed_info.get("id", "unknown")
+    solve_path = os.path.join(solve_root, str(task_id)) if solve_root else None
+
+    try:
+        seed_info = dict(raw_seed_info)
+        seed_info["checked_tools"] = validate_fixed_tool_catalog(
+            seed_info.get("checked_tools"),
+            run_config,
+        )
+        already_processed_path = run_config["logging"]["already_processed_path"]
+        solve_root = run_config["logging"]["solve_path"]
+        solve_path = os.path.join(solve_root, str(seed_info["id"]))
+        repeat_times = int(run_config["logging"]["repeat_times"])
+        if repeat_times <= 0:
+            raise ValueError("logging.repeat_times must be a positive integer")
+    except Exception as exc:
+        setup_failure = failure_from_exception(
+            {"seed_info": raw_seed_info, "node_trace": []},
+            exc,
+            graph_name="solve_task",
+            failure_node="__setup__",
+            failure_type="setup_exception",
+        )
+        return persist_and_report_failure(
+            setup_failure,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=raw_seed_info,
+            stage="setup",
+            logger=logger,
+            graph_name="solve_task",
+            lock=log_file_lock,
+        )
+
+    try:
+        if not os.path.exists(solve_path):
+            os.makedirs(solve_path)
+    except Exception as exc:
+        persistence_failure = failure_from_exception(
+            {"seed_info": seed_info, "node_trace": []},
+            exc,
+            graph_name="solve_task",
+            failure_node="__persistence__",
+            failure_type="persistence_exception",
+        )
+        return persist_and_report_failure(
+            persistence_failure,
+            failed_task_path=None,
+            solve_path=None,
+            seed_info=seed_info,
+            stage="persistence",
+            logger=logger,
+            graph_name="solve_task",
+        )
 
     tool_call_history_path = f"{solve_path}/tool_call_history.json"
     more_info_path = f"{solve_path}/more_info.json"
@@ -221,30 +289,50 @@ def run_agent(seed_info: dict, run_config: dict = None):
         return
 
     for _ in range(repeat_times):
-        solution_files = glob.glob(f"{solve_path}/solution*.json")
-        # 读取已有 solutionN.json 编号，保证重复采样追加而不是覆盖。
-        existing_numbers = []
-        for file in solution_files:
-            basename = os.path.basename(file)
-            # 只匹配 solution<number>.json，忽略其他临时或评测文件。
-            match = re.match(r'solution(\d+)\.json$', basename)
-            if match:
-                existing_numbers.append(int(match.group(1)))
+        try:
+            solution_files = glob.glob(f"{solve_path}/solution*.json")
+            # 读取已有 solutionN.json 编号，保证重复采样追加而不是覆盖。
+            existing_numbers = []
+            for file in solution_files:
+                basename = os.path.basename(file)
+                # 只匹配 solution<number>.json，忽略其他临时或评测文件。
+                match = re.match(r'solution(\d+)\.json$', basename)
+                if match:
+                    existing_numbers.append(int(match.group(1)))
 
-        next_number = max(existing_numbers) + 1 if existing_numbers else 1
+            next_number = max(existing_numbers) + 1 if existing_numbers else 1
 
-        if os.path.exists(tool_call_history_path):
-            with open(tool_call_history_path, 'r', encoding='utf-8') as f:
-                tool_call_history = json.load(f)
-        else:
-            tool_call_history = []
+            if os.path.exists(tool_call_history_path):
+                with open(tool_call_history_path, 'r', encoding='utf-8') as f:
+                    tool_call_history = json.load(f)
+            else:
+                tool_call_history = []
 
-        # 复采样复用初次合成的 more_info 和工具记忆，使多条 solution 共享同一虚拟知识库。
-        if os.path.exists(more_info_path):
-            with open(more_info_path, 'r', encoding='utf-8') as f:
-                more_info = json.load(f)
-        else:
-            more_info = {}
+            # 复采样复用初次合成的 more_info 和工具记忆，使多条 solution 共享同一虚拟知识库。
+            if os.path.exists(more_info_path):
+                with open(more_info_path, 'r', encoding='utf-8') as f:
+                    more_info = json.load(f)
+            else:
+                more_info = {}
+        except Exception as exc:
+            final_state = failure_from_exception(
+                {"seed_info": seed_info, "node_trace": []},
+                exc,
+                graph_name="solve_task",
+                failure_node="__persistence__",
+                failure_type="persistence_exception",
+            )
+            final_state = persist_and_report_failure(
+                final_state,
+                failed_task_path=failed_task_path,
+                solve_path=solve_path,
+                seed_info=seed_info,
+                stage="persistence",
+                logger=logger,
+                graph_name="solve_task",
+                lock=log_file_lock,
+            )
+            continue
 
         initial_state = {
             "fuzzy_task": seed_info["fuzzy_task"],
@@ -254,6 +342,13 @@ def run_agent(seed_info: dict, run_config: dict = None):
             "breaked": False,
             "task_finished": False,
             "failure_reason": "",
+            "failure_node": "",
+            "failure_type": "",
+            "failure_graph": "solve_task",
+            "exception_type": "",
+            "exception_message": "",
+            "failure_traceback": "",
+            "node_trace": [],
             "solve_history": [],
             "tool_call_history": tool_call_history,
             "tool_call_retry_count": 0,
@@ -262,29 +357,95 @@ def run_agent(seed_info: dict, run_config: dict = None):
         try:
             final_state = graph.invoke(initial_state, config=graph_config)
         except Exception as exc:
-            if not is_graph_recursion_error(exc):
-                raise
-            final_state = build_failure(
-                f"LangGraph recursion limit reached before stop condition: {exc}",
-                **{
-                    **initial_state,
+            if is_graph_recursion_error(exc):
+                final_state = failure_from_exception(
+                    initial_state,
+                    exc,
+                    graph_name="solve_task",
+                    failure_node="__graph__",
+                    failure_type="graph_recursion_limit",
+                )
+                final_state.update({
+                    "failure_reason": f"LangGraph recursion limit reached before stop condition: {exc}",
                     "max_solver_turns": max_solver_turns,
                     "recursion_limit": graph_config["recursion_limit"],
-                },
+                })
+            else:
+                final_state = failure_from_exception(
+                    initial_state,
+                    exc,
+                    graph_name="solve_task",
+                    failure_node="__graph__",
+                    failure_type="graph_exception",
+                )
+
+        if final_state.get("breaked"):
+            failure_reason = final_state.get("failure_reason") or "solver did not produce a valid final answer"
+            failure_type = final_state.get("failure_type") or "generation_failed"
+            final_state["failure_reason"] = failure_reason
+            final_state["failure_type"] = failure_type
+            final_state = persist_and_report_failure(
+                final_state,
+                failed_task_path=failed_task_path,
+                solve_path=solve_path,
+                seed_info=seed_info,
+                stage="graph",
+                logger=logger,
+                graph_name="solve_task",
+                lock=log_file_lock,
             )
+            continue
 
         solution_filename = f"{solve_path}/solution{next_number}.json"
 
-        with open(solution_filename, 'w', encoding='utf-8') as f:
-            f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
+        try:
+            with open(solution_filename, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
 
-        with open(f"{solve_path}/tool_call_history.json", 'w', encoding='utf-8') as f:
-            f.write(json.dumps(final_state["tool_call_history"], ensure_ascii=False, indent=4) + '\n')
+            with open(f"{solve_path}/tool_call_history.json", 'w', encoding='utf-8') as f:
+                f.write(json.dumps(final_state["tool_call_history"], ensure_ascii=False, indent=4) + '\n')
+        except Exception as exc:
+            final_state = failure_from_exception(
+                final_state,
+                exc,
+                graph_name="solve_task",
+                failure_node="__persistence__",
+                failure_type="persistence_exception",
+            )
+            final_state = persist_and_report_failure(
+                final_state,
+                failed_task_path=failed_task_path,
+                solve_path=solve_path,
+                seed_info=seed_info,
+                stage="persistence",
+                logger=logger,
+                graph_name="solve_task",
+                lock=log_file_lock,
+            )
 
-    with log_file_lock:
-        # Save basic task data
-        with open(already_processed_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"id": seed_info['id']}, ensure_ascii=False) + '\n')
+    try:
+        with log_file_lock:
+            # Save basic task data. Preserve the existing bookkeeping behavior for failed attempts.
+            with open(already_processed_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id": seed_info['id']}, ensure_ascii=False) + '\n')
+    except Exception as exc:
+        final_state = failure_from_exception(
+            final_state,
+            exc,
+            graph_name="solve_task",
+            failure_node="__persistence__",
+            failure_type="persistence_exception",
+        )
+        return persist_and_report_failure(
+            final_state,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=seed_info,
+            stage="persistence",
+            logger=logger,
+            graph_name="solve_task",
+            lock=log_file_lock,
+        )
     
     return final_state
 

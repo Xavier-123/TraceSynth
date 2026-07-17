@@ -41,6 +41,13 @@ class AgentState(TypedDict):
     current_tool_call: str
     task_finished: str
     failure_reason: str
+    failure_node: str
+    failure_type: str
+    failure_graph: str
+    exception_type: str
+    exception_message: str
+    failure_traceback: str
+    node_trace: List[Dict[str, Any]]
     tool_call_retry_count: int
     solver_turn_count: int
 
@@ -98,6 +105,10 @@ def validate_tool_call(tool_call: str, checked_tools: List[Dict[str, Any]]) -> t
     missing_args = [arg for arg in required_args if arg not in parsed["arguments"]]
     if missing_args:
         return False, f"tool_call.arguments missing required fields: {missing_args}"
+    allowed_args = set((tool_schema.get("parameters") or {}).get("properties") or {})
+    unexpected_args = sorted(set(parsed["arguments"]) - allowed_args)
+    if unexpected_args:
+        return False, f"tool_call.arguments contains unexpected fields: {unexpected_args}"
     return True, None
 
 

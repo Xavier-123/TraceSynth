@@ -1,12 +1,12 @@
 import json
 import re
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 from .call_llms import ParseError, call_and_parse
 from .prompt import mock_tool_system_prompt, mock_tool_user_prompt
 
 
-def _parse_mock_tool_response(response_text: str) -> Tuple[Union[Dict[str, Any], str], bool]:
+def _parse_mock_tool_response(response_text: str) -> Tuple[Union[Dict[str, Any], List[Any], str], bool]:
     cleaned_text = response_text.strip()
 
     json_block_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
@@ -54,6 +54,15 @@ def mock_tool_response(
         context=context or "(not provided)",
         **complexity.to_prompt_vars(),
     )
+    try:
+        tool_name = json.loads(query).get("name")
+    except (TypeError, json.JSONDecodeError, AttributeError):
+        tool_name = None
+    if tool_name == "critique_answer":
+        prompt += (
+            "\n\nFor critique_answer, tool_response must be exactly a JSON two-item "
+            "array [is_valid_boolean, critique_string]."
+        )
     messages = [
         {"role": "system", "content": mock_tool_system_prompt},
         {"role": "user", "content": prompt},

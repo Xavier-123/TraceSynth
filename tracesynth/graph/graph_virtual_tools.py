@@ -14,28 +14,39 @@ from tracesynth.io import (
     validate_seed_info,
     extract_predicted_answer,
     check_label_match,
-    write_failure_record,
 )
 from tracesynth.functions import (
     generate_tool_set, generate_fuzzy_task, tool_check,
     mock_tool_response,
 )
-from tracesynth.functions.call_llms import call_and_parse
+from tracesynth.functions.call_llms import ParseError, call_and_parse
 from tracesynth.functions.fuzzy_task import is_supervised_seed
 from tracesynth.functions.plan_trajectory import _build_plan_messages, _parse_plan_response
 from tracesynth.functions.execute_plan import _initial_solve_history_from_plan, _generate_final_answer_from_plan, _format_planned_tool_message
 from tracesynth.functions.evaluate_plan import validate_tool_call, _build_plan_evaluation_messages, _parse_plan_evaluation_response
+from tracesynth.fixed_tools import (
+    CRITIQUE_TOOL_NAME,
+    build_fixed_tool_catalog,
+    validate_fixed_plan_sequence,
+)
 from tracesynth.graph.node_utils import (
     AgentState,
     build_failure,
     create_step_config,
     get_synthesis_complexity,
     is_non_empty_text,
+    get_tool_call_max_retries,
     get_plan_max_revisions,
     get_solver_max_turns,
     get_graph_recursion_limit,
     is_graph_recursion_error,
     is_successful_final_state,
+    use_label_as_answer,
+)
+from tracesynth.graph.diagnostics import (
+    failure_from_exception,
+    instrument_node,
+    persist_and_report_failure,
 )
 
 # 多线程批量生成时会并发写 JSONL，统一用锁保护追加写入和失败快照。
@@ -44,18 +55,22 @@ logger = logging.getLogger(__name__)
 
 
 def toolset_gen_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------ToolSetGenAgent------------------")
+    logger.info("------------------ToolSetGenAgent------------------")
 
     # Create step-specific configuration
     step_config = create_step_config(config, "ToolSetGenAgent")
     cfg = ModelConfiguration.from_runnable_config(step_config)
     complexity = get_synthesis_complexity(config)
+    tool_catalog = build_fixed_tool_catalog(config)
 
     seed_info = state["seed_info"]
     background_info = seed_info.get("background") or seed_info.get("question", "")
     # 工具设计阶段只接触种子背景，负责生成初始任务、工具清单、工作流和约束。
     all_content, task, tools, workflow, restrict = generate_tool_set(
-        cfg=cfg, background_info=background_info, complexity=complexity,
+        cfg=cfg,
+        background_info=background_info,
+        tool_catalog=tool_catalog,
+        complexity=complexity,
     )
     if not all(is_non_empty_text(value) for value in (all_content, task, tools, workflow, restrict)):
         return build_failure(
@@ -79,7 +94,7 @@ def toolset_gen_node(state: AgentState, config: RunnableConfig):
 
 
 def fuzzy_task_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------FuzzyTaskAgent------------------")
+    logger.info("------------------FuzzyTaskAgent------------------")
     if state["breaked"]:
         return {}
 
@@ -139,19 +154,26 @@ def fuzzy_task_node(state: AgentState, config: RunnableConfig):
 
 
 def check_tools_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------ToolCheckAgent------------------")
+    logger.info("------------------ToolCheckAgent------------------")
 
     if state["breaked"]:
         return {}
 
-    # Create step-specific configuration
-    step_config = create_step_config(config, "ToolCheckAgent")
-    cfg = ModelConfiguration.from_runnable_config(step_config)
-
     initial_tools = state["initial_tools"]
     fuzzy_task = state["fuzzy_task"]
     complexity = get_synthesis_complexity(config)
-    checked_tools = tool_check(cfg, initial_tools, fuzzy_task, complexity=complexity)
+    canonical_tools = build_fixed_tool_catalog(config)
+    try:
+        checked_tools = tool_check(
+            None,
+            initial_tools,
+            fuzzy_task,
+            complexity=complexity,
+            canonical_tools=canonical_tools,
+        )
+    except (ParseError, ValueError) as exc:
+        logger.warning("ToolCheckAgent rejected tools for task %s: %s", fuzzy_task, exc)
+        return build_failure(str(exc), **{"checked_tools": None})
 
     if checked_tools is None:
         logger.warning("ToolCheckAgent returned invalid tools for task %s", fuzzy_task)
@@ -163,7 +185,7 @@ def check_tools_node(state: AgentState, config: RunnableConfig):
 
 
 def plan_trajectory_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------PlanTrajectoryAgent------------------")
+    logger.info("------------------PlanTrajectoryAgent------------------")
 
     if state["breaked"]:
         return {}
@@ -203,7 +225,7 @@ def plan_trajectory_node(state: AgentState, config: RunnableConfig):
 
 
 def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
-    issues = []
+    issues = validate_fixed_plan_sequence(plan)
     tool_names = {tool.get("name") for tool in checked_tools}
     for index, step in enumerate(plan):
         tool_name = step.get("tool_name")
@@ -220,7 +242,7 @@ def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[
 
 
 def evaluate_plan_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------EvaluatePlanAgent------------------")
+    logger.info("------------------EvaluatePlanAgent------------------")
 
     if state["breaked"]:
         return {}
@@ -234,6 +256,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
         step_name="EvaluatePlanAgent",
     )
     if evaluation is None:
+        logger.error("EvaluatePlanAgent returned invalid evaluation JSON")
         return build_failure(
             "EvaluatePlanAgent returned invalid evaluation JSON",
             **{
@@ -245,6 +268,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     basic_issues = _basic_plan_validation(state.get("plan", []), state["checked_tools"])
     if basic_issues:
         # LLM 评估可能漏掉结构性错误，因此再用确定性校验强制拦截未知工具和缺参计划。
+        logger.warning(basic_issues)
         evaluation["is_valid"] = False
         evaluation.setdefault("issues", [])
         evaluation["issues"].extend(basic_issues)
@@ -254,6 +278,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
     max_revisions = get_plan_max_revisions(config)
     if not evaluation["is_valid"] and int(state.get("plan_revision_count", 0) or 0) >= max_revisions:
         # 达到最大修订次数后不再继续重规划，避免图在坏计划上无限循环。
+        logger.error(f"EvaluatePlanAgent rejected plan after max_plan_revisions={max_revisions}")
         return build_failure(
             f"EvaluatePlanAgent rejected plan after max_plan_revisions={max_revisions}",
             **{
@@ -272,7 +297,7 @@ def evaluate_plan_node(state: AgentState, config: RunnableConfig):
 
 
 def execute_plan_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------ExecutePlanAgent------------------")
+    logger.info("------------------ExecutePlanAgent------------------")
 
     if state["breaked"]:
         return {
@@ -337,7 +362,7 @@ def execute_plan_node(state: AgentState, config: RunnableConfig):
 
 
 def mock_tools_node(state: AgentState, config: RunnableConfig):
-    logger.debug("------------------MockToolsAgent------------------")
+    logger.info("------------------MockToolsAgent------------------")
     if state["breaked"]:
         return {}
 
@@ -359,6 +384,7 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
         context=state["seed_info"].get("context", "") or "",
     )
     if tool_response is None:
+        logger.error("MockToolAgent returned no tool response")
         return build_failure(
             "MockToolAgent returned no tool response",
             **{
@@ -368,11 +394,17 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
             },
         )
 
-    tool_response_message = {"role": "tool", "content": f"<tool_response>{tool_response}</tool_response>"}
+    serialized_tool_response = json.dumps(tool_response, ensure_ascii=False)
+    tool_response_message = {
+        "role": "tool",
+        "content": f"<tool_response>{serialized_tool_response}</tool_response>",
+    }
 
     solve_history.append(tool_response_message)
-    if new_bg_introduced:
-        tool_call_history.append(f"Query:\n{tool_call}, Response:\n{tool_response}")
+    # Fixed-pipeline outputs are all relevant to later answer generation and replanning.
+    tool_call_history.append(
+        f"Query:\n{tool_call}, Response:\n{serialized_tool_response}"
+    )
 
     update = {
         "tool_call_history": tool_call_history,
@@ -399,7 +431,58 @@ def mock_tools_node(state: AgentState, config: RunnableConfig):
             "current_plan_step": current_plan_step + 1,
         })
 
+    try:
+        tool_name = json.loads(tool_call).get("name")
+    except (TypeError, json.JSONDecodeError, AttributeError):
+        tool_name = None
+    if tool_name == CRITIQUE_TOOL_NAME:
+        if not (
+            isinstance(tool_response, list)
+            and len(tool_response) == 2
+            and isinstance(tool_response[0], bool)
+            and isinstance(tool_response[1], str)
+        ):
+            logger.error("critique_answer must return [bool, str]")
+            return build_failure(
+                "critique_answer must return [bool, str]",
+                **update,
+            )
+
+        critique_passed, critique_text = tool_response
+        if not critique_passed:
+            revision_count = int(state.get("plan_revision_count", 0) or 0)
+            max_revisions = get_plan_max_revisions(config)
+            evaluation = {
+                "is_valid": False,
+                "reasons": ["critique_answer rejected the generated answer."],
+                "issues": [critique_text],
+                "revision_suggestions": [
+                    "Use the critique to revise query optimization, retrieval, and evidence processing."
+                ],
+            }
+            if revision_count >= max_revisions:
+                return build_failure(
+                    f"critique_answer rejected answer after max_plan_revisions={max_revisions}",
+                    **update,
+                    plan_evaluation=evaluation,
+                    plan_is_valid=False,
+                    max_plan_revisions=max_revisions,
+                )
+            update.update({
+                "task_finished": "Need replan",
+                "plan_evaluation": evaluation,
+                "plan_is_valid": False,
+            })
+
     return update
+
+
+def should_continue_after_tool(state: AgentState):
+    if state.get("breaked"):
+        return "end"
+    if state.get("task_finished") == "Need replan":
+        return "replan"
+    return "execute"
 
 
 def should_execute_or_replan(state: AgentState):
@@ -428,13 +511,13 @@ def should_continue_execution(state: AgentState):
 
 # Build the graph
 builder = StateGraph(AgentState, config_schema=RunnableConfig)
-builder.add_node("toolset_gen", toolset_gen_node)
-builder.add_node("fuzzy_task", fuzzy_task_node)
-builder.add_node("check_tools", check_tools_node)
-builder.add_node("plan_trajectory", plan_trajectory_node)
-builder.add_node("evaluate_plan", evaluate_plan_node)
-builder.add_node("execute_plan", execute_plan_node)
-builder.add_node("mock_tools", mock_tools_node)
+builder.add_node("toolset_gen", instrument_node("virtual_tools", "toolset_gen", toolset_gen_node))
+builder.add_node("fuzzy_task", instrument_node("virtual_tools", "fuzzy_task", fuzzy_task_node))
+builder.add_node("check_tools", instrument_node("virtual_tools", "check_tools", check_tools_node))
+builder.add_node("plan_trajectory", instrument_node("virtual_tools", "plan_trajectory", plan_trajectory_node))
+builder.add_node("evaluate_plan", instrument_node("virtual_tools", "evaluate_plan", evaluate_plan_node))
+builder.add_node("execute_plan", instrument_node("virtual_tools", "execute_plan", execute_plan_node))
+builder.add_node("mock_tools", instrument_node("virtual_tools", "mock_tools", mock_tools_node))
 
 builder.set_entry_point("toolset_gen")
 builder.add_edge("toolset_gen", "fuzzy_task")
@@ -452,7 +535,11 @@ builder.add_conditional_edges(
     should_continue_execution,
     {"tool_call": "mock_tools", "replan": "plan_trajectory", "end": END},
 )
-builder.add_edge("mock_tools", "execute_plan")
+builder.add_conditional_edges(
+    "mock_tools",
+    should_continue_after_tool,
+    {"execute": "execute_plan", "replan": "plan_trajectory", "end": END},
+)
 graph = builder.compile()
 
 
@@ -466,55 +553,88 @@ def save_architecture_diagram(output_path: str) -> None:
         f.write(img_bytes)
 
 # --- 运行入口 ---
-def save_failure_artifacts(solve_path: str, final_state: Dict[str, Any]) -> None:
-    """Persist failed state and any partial reasoning trajectory."""
-    os.makedirs(solve_path, exist_ok=True)
-    # 失败样本保留完整状态和部分轨迹，便于人工复盘或后续重试。
-    with open(os.path.join(solve_path, "failed_state.json"), 'w', encoding='utf-8') as f:
-        f.write(json.dumps(final_state, ensure_ascii=False, indent=4) + '\n')
-
-    solve_history = final_state.get("solve_history")
-    if isinstance(solve_history, list):
-        with open(os.path.join(solve_path, "failed_solution.json"), 'w', encoding='utf-8') as f:
-            f.write(json.dumps(solve_history, ensure_ascii=False, indent=4) + '\n')
-
-    tool_call_history = final_state.get("tool_call_history")
-    if isinstance(tool_call_history, list):
-        with open(os.path.join(solve_path, "tool_call_history.json"), 'w', encoding='utf-8') as f:
-            f.write(json.dumps(tool_call_history, ensure_ascii=False, indent=4) + '\n')
-
-
 def run_agent(seed_info: dict, run_config: dict = None):
-    run_config = run_config or {}
-    seed_info = validate_seed_info(seed_info)
-    # 运行入口先统一种子 schema，再读取日志、失败日志和求解产物目录配置。
-    virtual_tool_use_task_path = run_config["logging"]["task_file_path"]
-    failed_task_path = run_config["logging"].get(
-        "failed_task_file_path",
-        f"{virtual_tool_use_task_path}.failed",
-    )
-    solve_path = run_config["logging"]["solve_path"]
-    eval_cfg = run_config.get("evaluation") or {}
+    raw_config = run_config or {}
+    raw_seed_info = dict(seed_info) if isinstance(seed_info, dict) else {}
+    logging_cfg = raw_config.get("logging") or {}
+    virtual_tool_use_task_path = logging_cfg.get("task_file_path")
+    failed_task_path = logging_cfg.get("failed_task_file_path")
+    if not failed_task_path and virtual_tool_use_task_path:
+        failed_task_path = f"{virtual_tool_use_task_path}.failed"
+    solve_root = logging_cfg.get("solve_path")
+    task_id = raw_seed_info.get("id", "unknown")
+    solve_path = os.path.join(solve_root, str(task_id)) if solve_root else None
+
+    try:
+        # Fail before graph execution when domain schemas or input/config fields are invalid.
+        build_fixed_tool_catalog(raw_config)
+        seed_info = validate_seed_info(raw_seed_info)
+        virtual_tool_use_task_path = raw_config["logging"]["task_file_path"]
+        solve_root = raw_config["logging"]["solve_path"]
+        solve_path = os.path.join(solve_root, str(seed_info["id"]))
+    except Exception as exc:
+        setup_failure = failure_from_exception(
+            {"seed_info": raw_seed_info, "node_trace": []},
+            exc,
+            graph_name="virtual_tools",
+            failure_node="__setup__",
+            failure_type="setup_exception",
+        )
+        return persist_and_report_failure(
+            setup_failure,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=raw_seed_info,
+            stage="setup",
+            logger=logger,
+            graph_name="virtual_tools",
+            lock=log_file_lock,
+        )
+
+    eval_cfg = raw_config.get("evaluation") or {}
     skip_label_match = bool(eval_cfg.get("skip_label_match", False))
 
-    log_dir = os.path.dirname(virtual_tool_use_task_path)
-    if log_dir and not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
-    failed_log_dir = os.path.dirname(failed_task_path)
-    if failed_log_dir and not os.path.exists(failed_log_dir):
-        os.makedirs(failed_log_dir, exist_ok=True)
+    try:
+        log_dir = os.path.dirname(virtual_tool_use_task_path)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        failed_log_dir = os.path.dirname(failed_task_path)
+        if failed_log_dir and not os.path.exists(failed_log_dir):
+            os.makedirs(failed_log_dir, exist_ok=True)
+        if not os.path.exists(solve_path):
+            os.makedirs(solve_path, exist_ok=True)
+    except Exception as exc:
+        persistence_failure = failure_from_exception(
+            {"seed_info": seed_info, "node_trace": []},
+            exc,
+            graph_name="virtual_tools",
+            failure_node="__persistence__",
+            failure_type="persistence_exception",
+        )
+        return persist_and_report_failure(
+            persistence_failure,
+            failed_task_path=None,
+            solve_path=None,
+            seed_info=seed_info,
+            stage="persistence",
+            logger=logger,
+            graph_name="virtual_tools",
+        )
 
-    solve_path = os.path.join(solve_path, f"{seed_info['id']}")
-    if not os.path.exists(solve_path):
-        os.makedirs(solve_path, exist_ok=True)
-
-    run_config = {"configurable": run_config or {}}
+    run_config = {"configurable": raw_config}
 
     initial_state = {
         "seed_info": seed_info,
         "breaked": False,
         "task_finished": False,
         "failure_reason": "",
+        "failure_node": "",
+        "failure_type": "",
+        "failure_graph": "virtual_tools",
+        "exception_type": "",
+        "exception_message": "",
+        "failure_traceback": "",
+        "node_trace": [],
         "plan": [],
         "plan_evaluation": {},
         "plan_is_valid": False,
@@ -534,44 +654,83 @@ def run_agent(seed_info: dict, run_config: dict = None):
         # 一次图调用覆盖完整合成生命周期：工具生成、模糊任务、计划、执行和最终回答。
         final_state = graph.invoke(initial_state, config=run_config)
     except Exception as exc:
-        if not is_graph_recursion_error(exc):
-            raise
-        final_state = build_failure(
-            f"LangGraph recursion limit reached before stop condition: {exc}",
-            **{
-                **initial_state,
+        if is_graph_recursion_error(exc):
+            final_state = failure_from_exception(
+                initial_state,
+                exc,
+                graph_name="virtual_tools",
+                failure_node="__graph__",
+                failure_type="graph_recursion_limit",
+            )
+            final_state.update({
+                "failure_reason": f"LangGraph recursion limit reached before stop condition: {exc}",
                 "solver_turn_count": initial_state.get("solver_turn_count", 0),
                 "max_solver_turns": max_solver_turns,
                 "recursion_limit": run_config["recursion_limit"],
-            },
-        )
+            })
+        else:
+            final_state = failure_from_exception(
+                initial_state,
+                exc,
+                graph_name="virtual_tools",
+                failure_node="__graph__",
+                failure_type="graph_exception",
+            )
 
     if not is_successful_final_state(final_state):
         # 图级失败会写入失败 JSONL 和快照文件，避免只在日志里丢失失败样本。
         failure_reason = final_state.get("failure_reason") or "generation did not produce a valid final answer"
-        failure_type = (
-            "graph_recursion_limit"
-            if "recursion limit" in failure_reason.lower()
-            else "generation_failed"
+        failure_type = final_state.get("failure_type") or (
+            "graph_recursion_limit" if "recursion limit" in failure_reason.lower() else "generation_failed"
         )
-        with log_file_lock:
-            write_failure_record(
-                failed_task_path,
-                seed_info=seed_info,
-                final_state=final_state,
-                stage="graph",
-                failure_type=failure_type,
-                failure_reason=failure_reason,
+        if not final_state.get("failure_node"):
+            node_trace = final_state.get("node_trace") or []
+            final_state["failure_node"] = next(
+                (
+                    entry.get("node")
+                    for entry in reversed(node_trace)
+                    if isinstance(entry, dict) and entry.get("node")
+                ),
+                "__graph__",
             )
-            save_failure_artifacts(solve_path, final_state)
-        return final_state
+        final_state["failure_reason"] = failure_reason
+        final_state["failure_type"] = failure_type
+        return persist_and_report_failure(
+            final_state,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=seed_info,
+            stage="graph",
+            logger=logger,
+            graph_name="virtual_tools",
+            lock=log_file_lock,
+        )
 
-    predicted_answer = extract_predicted_answer(final_state.get("solve_history"))
-    label_check = check_label_match(
-        predicted_answer,
-        seed_info.get("label", ""),
-        skip=skip_label_match,
-    )
+    try:
+        predicted_answer = extract_predicted_answer(final_state.get("solve_history"))
+        label_check = check_label_match(
+            predicted_answer,
+            seed_info.get("label", ""),
+            skip=skip_label_match,
+        )
+    except Exception as exc:
+        label_failure = failure_from_exception(
+            final_state,
+            exc,
+            graph_name="virtual_tools",
+            failure_node="label_check",
+            failure_type="label_check_exception",
+        )
+        return persist_and_report_failure(
+            label_failure,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=seed_info,
+            stage="label_check",
+            logger=logger,
+            graph_name="virtual_tools",
+            lock=log_file_lock,
+        )
     if label_check["label_match_status"] in {"mismatch", "missing_answer"}:
         # P0 标签校验放在成功状态之后，确保落盘轨迹不仅有答案，而且答案与金标一致。
         failure_reason = (
@@ -579,19 +738,27 @@ def run_agent(seed_info: dict, run_config: dict = None):
             if label_check["label_match_status"] == "missing_answer"
             else "predicted answer does not match label"
         )
-        with log_file_lock:
-            write_failure_record(
-                failed_task_path,
-                seed_info=seed_info,
-                final_state=final_state,
-                stage="label_check",
-                failure_type=label_check["label_match_status"],
-                failure_reason=failure_reason,
-                label_check=label_check,
-            )
-            failed_state = {**final_state, **label_check, "breaked": True, "failure_reason": failure_reason}
-            save_failure_artifacts(solve_path, failed_state)
-        return failed_state
+        failed_state = {
+            **final_state,
+            **label_check,
+            "breaked": True,
+            "task_finished": "Terminated",
+            "failure_reason": failure_reason,
+            "failure_node": "label_check",
+            "failure_type": label_check["label_match_status"],
+            "failure_graph": "virtual_tools",
+        }
+        return persist_and_report_failure(
+            failed_state,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=seed_info,
+            stage="label_check",
+            logger=logger,
+            graph_name="virtual_tools",
+            label_check=label_check,
+            lock=log_file_lock,
+        )
 
     save_data = {
         "id": seed_info["id"],
@@ -608,50 +775,69 @@ def run_agent(seed_info: dict, run_config: dict = None):
         "match_score": label_check.get("match_score"),
     }
 
-    with log_file_lock:
-        solution_files = glob.glob(f"{solve_path}/solution*.json")
-        existing_numbers = []
-        for file in solution_files:
-            basename = os.path.basename(file)
-            match = re.match(r'solution(\d+)\.json$', basename)
-            if match:
-                existing_numbers.append(int(match.group(1)))
+    try:
+        with log_file_lock:
+            solution_files = glob.glob(f"{solve_path}/solution*.json")
+            existing_numbers = []
+            for file in solution_files:
+                basename = os.path.basename(file)
+                match = re.match(r'solution(\d+)\.json$', basename)
+                if match:
+                    existing_numbers.append(int(match.group(1)))
 
-        # 同一任务可能多次采样，按已有 solutionN.json 自动分配下一个编号。
-        next_number = max(existing_numbers) + 1 if existing_numbers else 1
-        solution_filename = f"{solve_path}/solution{next_number}.json"
-        save_data["solution_file"] = os.path.basename(solution_filename)
+            # 同一任务可能多次采样，按已有 solutionN.json 自动分配下一个编号。
+            next_number = max(existing_numbers) + 1 if existing_numbers else 1
+            solution_filename = f"{solve_path}/solution{next_number}.json"
+            save_data["solution_file"] = os.path.basename(solution_filename)
 
-        with open(solution_filename, 'w', encoding='utf-8') as f:
-            f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
+            with open(solution_filename, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(final_state["solve_history"], ensure_ascii=False, indent=4) + '\n')
 
-        with open(f"{solve_path}/tool_call_history.json", 'w', encoding='utf-8') as f:
-            f.write(json.dumps(final_state["tool_call_history"], ensure_ascii=False, indent=4) + '\n')
+            with open(f"{solve_path}/tool_call_history.json", 'w', encoding='utf-8') as f:
+                f.write(json.dumps(final_state["tool_call_history"], ensure_ascii=False, indent=4) + '\n')
 
-        more_info = {
-            "question": seed_info.get("question"),
-            "label": seed_info.get("label"),
-            "context": seed_info.get("context"),
-            "context_present": bool(seed_info.get("context")),
-            "restrict": final_state["restrict"],
-            "task_background": final_state["task_background"],
-            "initial_workflow": final_state["initial_workflow"],
-            "plan": final_state.get("plan", []),
-            "plan_evaluation": final_state.get("plan_evaluation", {}),
-            "executed_steps": final_state.get("executed_steps", []),
-            "step_results": final_state.get("step_results", []),
-            "predicted_answer": predicted_answer,
-            "label_match_status": label_check["label_match_status"],
-            "match_score": label_check.get("match_score"),
-            "synthesis_complexity": SynthesisComplexity.from_run_config(
-                run_config.get("configurable", {})
-            ).model_dump(),
-        }
-        with open(f"{solve_path}/more_info.json", 'w', encoding='utf-8') as f:
-            f.write(json.dumps(more_info, ensure_ascii=False, indent=4) + '\n')
+            more_info = {
+                "question": seed_info.get("question"),
+                "label": seed_info.get("label"),
+                "context": seed_info.get("context"),
+                "context_present": bool(seed_info.get("context")),
+                "restrict": final_state["restrict"],
+                "task_background": final_state["task_background"],
+                "initial_workflow": final_state["initial_workflow"],
+                "plan": final_state.get("plan", []),
+                "plan_evaluation": final_state.get("plan_evaluation", {}),
+                "executed_steps": final_state.get("executed_steps", []),
+                "step_results": final_state.get("step_results", []),
+                "predicted_answer": predicted_answer,
+                "label_match_status": label_check["label_match_status"],
+                "match_score": label_check.get("match_score"),
+                "synthesis_complexity": SynthesisComplexity.from_run_config(
+                    run_config.get("configurable", {})
+                ).model_dump(),
+            }
+            with open(f"{solve_path}/more_info.json", 'w', encoding='utf-8') as f:
+                f.write(json.dumps(more_info, ensure_ascii=False, indent=4) + '\n')
 
-        with open(virtual_tool_use_task_path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(save_data, ensure_ascii=False) + '\n')
+            with open(virtual_tool_use_task_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(save_data, ensure_ascii=False) + '\n')
+    except Exception as exc:
+        persistence_failure = failure_from_exception(
+            final_state,
+            exc,
+            graph_name="virtual_tools",
+            failure_node="__persistence__",
+            failure_type="persistence_exception",
+        )
+        return persist_and_report_failure(
+            persistence_failure,
+            failed_task_path=failed_task_path,
+            solve_path=solve_path,
+            seed_info=seed_info,
+            stage="persistence",
+            logger=logger,
+            graph_name="virtual_tools",
+            lock=log_file_lock,
+        )
 
     return final_state
 

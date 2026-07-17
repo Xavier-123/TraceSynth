@@ -251,7 +251,22 @@ def build_failure_record(
         "checked_tools": final_state.get("checked_tools"),
         "label_match_status": label_check.get("label_match_status"),
         "match_score": label_check.get("match_score"),
+        "failure_node": final_state.get("failure_node"),
+        "exception_type": final_state.get("exception_type"),
+        "exception_message": final_state.get("exception_message"),
+        "failure_graph": final_state.get("failure_graph"),
     }
+
+    node_trace = final_state.get("node_trace")
+    if isinstance(node_trace, list):
+        record["last_successful_node"] = next(
+            (
+                entry.get("node")
+                for entry in reversed(node_trace)
+                if isinstance(entry, dict) and entry.get("status") == "success"
+            ),
+            None,
+        )
 
     if "predicted_answer" in label_check:
         record["predicted_answer"] = label_check.get("predicted_answer")
@@ -270,6 +285,7 @@ def write_failure_record(
     failure_reason: str,
     label_check: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
+    diagnostic_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Append a normalized failure record and return the payload."""
     path = Path(failed_log_file_path)
@@ -296,6 +312,10 @@ def write_failure_record(
             label_check=label_check,
             extra=extra,
         )
+        if diagnostic_dir is not None:
+            record["diagnostic_file"] = str(
+                Path(diagnostic_dir) / f"failure_attempt_{attempt_index}.json"
+            )
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     return record

@@ -12,14 +12,14 @@ from tracesynth.graph.node_utils import (
     AgentState,
     validate_tool_call,
 )
-# from tracesynth.graph.plan_trajectory_node import _extract_xml_json, _tools_for_prompt
-from tracesynth.functions.plan_trajectory import extract_xml_json, tools_for_prompt
+from tracesynth.functions.plan_trajectory import _extract_xml_json, _tools_for_prompt
+from tracesynth.fixed_tools import validate_fixed_plan_sequence
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_plan_evaluation_response(content: str) -> Dict[str, Any]:
-    evaluation = extract_xml_json(content, "plan_evaluation")
+    evaluation = _extract_xml_json(content, "plan_evaluation")
     if not isinstance(evaluation, dict):
         raise ParseError("plan_evaluation must be a JSON object")
     if "is_valid" not in evaluation or not isinstance(evaluation["is_valid"], bool):
@@ -48,7 +48,7 @@ def _build_plan_evaluation_messages(state: AgentState) -> List[Dict[str, str]]:
             "content": plan_evaluation_user_prompt.format(
                 fuzzy_task=state["fuzzy_task"],
                 restrict=state.get("restrict", ""),
-                available_tools=tools_for_prompt(state["checked_tools"]),
+                available_tools=_tools_for_prompt(state["checked_tools"]),
                 plan_json=json.dumps(state.get("plan", []), ensure_ascii=False, indent=2),
             ),
         },
@@ -56,7 +56,7 @@ def _build_plan_evaluation_messages(state: AgentState) -> List[Dict[str, str]]:
 
 
 def _basic_plan_validation(plan: List[Dict[str, Any]], checked_tools: List[Dict[str, Any]]) -> List[str]:
-    issues = []
+    issues = validate_fixed_plan_sequence(plan)
     tool_names = {tool.get("name") for tool in checked_tools}
     for index, step in enumerate(plan):
         tool_name = step.get("tool_name")
