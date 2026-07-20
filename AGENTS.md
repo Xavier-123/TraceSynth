@@ -18,6 +18,6 @@ Ignored paths:
 
 When searching the repository:
 
-- Only search under tracesynth/
+- Only search under tracesynth/ and /configs and /scripts directories.
 - Only inspect tests/ if debugging tests.
 - Do not use global grep across ignored directories.

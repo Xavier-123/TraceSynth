@@ -4,83 +4,114 @@ step_models:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
-    max_tokens: 10240
-    temperature: 0.9
-    use_thinking: false
+    llm_params:
+      temperature: 0.9
+      max_completion_tokens: 8192
+      top_p: 0.95
+      seed: 42
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   FuzzyTaskAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   ToolCheckAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   PlanTrajectoryAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
-    temperature: 0.9
-    use_thinking: false
+    temperature: 0.3
+    extra_body:
+      chat_template_kwargs:
+        thinking: true
   EvaluatePlanAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
-    temperature: 0.9
-    use_thinking: false
+    temperature: 0.2
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   ExecutePlanAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   MockToolAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: false
   MockUserAgent:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: true
   FallbackModel:
     name: "qwen3-235b-a22b-instruct-2507"
     api_base: "Qwen3_235B_A22B_Instruct_ADDRESS_bailian"
     api_key_env: "Qwen3_235B_A22B_Instruct_API_KEY_bailian"
     max_tokens: 10240
     temperature: 0.9
-    use_thinking: false
+    extra_body:
+      chat_template_kwargs:
+        thinking: true
+
+# Agentic RAG 数据合成复杂度（6 步流程，4 个参数）
+synthesis:
+  paraphrase_supervised_question: true
+  task_complexity:
+    num_tools: "4~7"                # RAG 工具总数（须≥4 覆盖 step2~5）
+  iteration_complexity:
+    max_iterations: "1~3"           # 步骤5→2 检索迭代轮次
 
 processing:
   max_workers: 1
-  max_tasks: 2
+  max_tasks: 1
   retry_failed_tasks: true
+  max_plan_revisions: 5
   max_solver_turns: 18
   graph_recursion_limit: 60
 
 retry:
   api_max_retries: 3
   api_retry_base: 1.0
-  parse_max_retries: 2
+  parse_max_retries: 3
   tool_call_max_retries: 3
 
 logging:
   task_file_path: "../output/virtual_tool_use.jsonl"
   failed_task_file_path: "../output/virtual_tool_use.failed.jsonl"
   solve_path: "../output/solve_tool_use/"
+  level: "info"
 
 evaluation:
   skip_label_match: false
@@ -97,11 +128,132 @@ input:
 paths:
   data_file: "../configs/persona_5K.jsonl"
 
-# Agentic RAG 数据合成复杂度（6 步流程，4 个参数）
-synthesis:
-  task_complexity:
-    num_tools: "4~6"
-    num_custom_tools: "1"
-    distractor_tools: "1~2"
-  iteration_complexity:
-    max_iterations: "1~2"
+tool_schemas:
+  EvidenceItem:
+    type: object
+    description: Canonical evidence unit used throughout the workflow.
+    properties:
+      evidence_id:
+        type: string
+        description: 证据的唯一标识
+      content:
+        type: string
+        description: 证据正文内容
+      source_type:
+        type: string
+        description: 证据来源类型
+        default: unknown
+      source_id:
+        type: string
+        description: 来源文档、节点或记录的标识
+        default: ""
+      metadata:
+        type: object
+        description: 证据附带的扩展元数据
+        additionalProperties: true
+        default: {}
+      score:
+        description: 证据的检索或相关性分数
+        anyOf:
+          - type: number
+          - type: "null"
+        default: null
+      citations:
+        type: array
+        description: 与该证据关联的引用信息
+        items:
+          type: string
+        default: []
+    required:
+      - evidence_id
+      - content
+    additionalProperties: false
+
+  RetrievalRequest:
+    type: object
+    description: Structured request produced by the query processor.
+    properties:
+      node_id:
+        type: string
+        description: 发起检索请求的工作流节点标识
+        default: ""
+      original_query:
+        type: string
+        description: 用户输入的原始查询
+        default: ""
+      retrieval_query:
+        type: string
+        description: 经过处理后实际用于检索的查询
+        default: ""
+      question:
+        type: string
+        description: 当前需要回答的问题
+        default: ""
+      entities:
+        type: array
+        description: 从查询中识别出的实体
+        items:
+          type: string
+        default: []
+      relations:
+        type: array
+        description: 从查询中识别出的关系
+        items:
+          type: string
+        default: []
+      context_hints:
+        type: object
+        description: 辅助检索的上下文提示
+        additionalProperties: true
+        default: {}
+      top_k:
+        type: integer
+        description: 期望返回的最大证据数量
+        minimum: 1
+        default: 5
+      supplemental_queries:
+        type: array
+        description: 用于补充召回的附加查询
+        items:
+          type: string
+        default: []
+      filters:
+        type: object
+        description: 检索过滤条件
+        additionalProperties: true
+        default: {}
+    required: []
+    additionalProperties: false
+
+  AnswerAttempt:
+    type: object
+    description: Candidate answer and its supporting or missing information.
+    properties:
+      answer:
+        type: string
+        description: 当前生成的候选答案
+        default: ""
+      justification:
+        type: string
+        description: 生成该答案的依据和解释
+        default: ""
+      supporting_evidence_ids:
+        type: array
+        description: 支撑候选答案的证据 ID
+        items:
+          type: string
+        default: []
+      known_information:
+        type: array
+        description: 当前证据已经确认的信息
+        items:
+          type: string
+        default: []
+      missing_information:
+        type: array
+        description: 回答问题仍然缺少的信息
+        items:
+          type: string
+        default: []
+    required: []
+    additionalProperties: false
